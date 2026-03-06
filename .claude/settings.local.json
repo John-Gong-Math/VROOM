@@ -8,7 +8,8 @@
       "Bash(gcloud compute ssh vroom-msm-bench:*)",
       "Bash(tar czf:*)",
       "Bash(gcloud compute instances list:*)",
-      "Bash(gcloud compute scp:*)"
+      "Bash(gcloud compute scp:*)",
+      "Bash(bash:*)"
     ]
   }
 }

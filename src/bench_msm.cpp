@@ -165,9 +165,9 @@ static void BM_BLST_Pippenger(benchmark::State& state) {
     }
 }
 
-// Register benchmarks for various point counts
-BENCHMARK(BM_VROOM_MSM)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096)->Arg(16384)->Arg(65536)->Arg(262144)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
-BENCHMARK(BM_VROOM_MSM_Parallel)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096)->Arg(16384)->Arg(65536)->Arg(262144)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
-BENCHMARK(BM_BLST_Pippenger)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096)->Arg(16384)->Arg(65536)->Arg(262144)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
+// Register benchmarks for 2^20 points
+BENCHMARK(BM_VROOM_MSM)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
+BENCHMARK(BM_VROOM_MSM_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
+BENCHMARK(BM_BLST_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond)->MinWarmUpTime(0.5);
 
 BENCHMARK_MAIN();

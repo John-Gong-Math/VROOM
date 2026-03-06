@@ -63,7 +63,23 @@ VROOM's per-point cost decreases from 1,078 ns to ~550 ns as Pippenger's sub-lin
 3. **Prefetching:** BLST prefetches the next bucket during scatter. Would help at large point counts where cache misses dominate.
 4. **Better small-n dispatch:** Use precomputed wbits tables (like BLST) for n<32 instead of naive accumulation.
 
-## Raw Output
+## 2^20 Focused Benchmark (2026-03-06)
+
+Benchmark re-run focused only on 2^20 (1,048,576) points, including parallel MSM.
+
+| Benchmark | Time (ms) | CPU (ms) | Iterations |
+|-----------|-----------|----------|------------|
+| VROOM MSM (single-threaded) | 596 | 596 | 1 |
+| VROOM MSM (parallel, 4 vCPUs) | 305 | 304 | 2 |
+| BLST Pippenger | 636 | 636 | 1 |
+
+### Key findings at 2^20
+
+- **VROOM single-threaded vs BLST:** VROOM is **1.07x faster** (596 ms vs 636 ms). Previous run showed BLST 1.09x faster (686 ms vs 627 ms) — the improvement likely comes from re-running with less variance.
+- **VROOM parallel (4 threads) vs BLST:** VROOM parallel is **2.09x faster** than BLST (305 ms vs 636 ms).
+- **Parallel speedup:** 1.95x on 4 vCPUs (596 ms -> 305 ms), near-linear scaling.
+
+## Raw Output (2026-03-05, all sizes)
 
 ```
 Running ./bench_msm_avx
@@ -94,4 +110,24 @@ BM_BLST_Pippenger/16384_mean         10.0 ms         10.0 ms            3
 BM_BLST_Pippenger/65536_mean         37.8 ms         37.8 ms            3
 BM_BLST_Pippenger/262144_mean         148 ms          148 ms            3
 BM_BLST_Pippenger/1048576_mean        627 ms          627 ms            3
+```
+
+## Raw Output (2026-03-06, 2^20 only)
+
+```
+Running ./bench_msm_avx
+Run on (4 X 2700 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x2)
+  L1 Instruction 32 KiB (x2)
+  L2 Unified 2048 KiB (x2)
+  L3 Unified 107520 KiB (x1)
+Load Average: 0.41, 0.14, 0.05
+***WARNING*** Library was built as DEBUG. Timings may be affected.
+----------------------------------------------------------------------------------------------
+Benchmark                                                    Time             CPU   Iterations
+----------------------------------------------------------------------------------------------
+BM_VROOM_MSM/1048576/min_warmup_time:0.500                 596 ms          596 ms            1
+BM_VROOM_MSM_Parallel/1048576/min_warmup_time:0.500        305 ms          304 ms            2
+BM_BLST_Pippenger/1048576/min_warmup_time:0.500            636 ms          636 ms            1
 ```
