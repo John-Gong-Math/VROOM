@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(chmod +x:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(make CXX=clang++:*)",
+      "Bash(command:*)",
+      "Bash(gcloud compute ssh vroom-msm-bench:*)",
+      "Bash(tar czf:*)",
+      "Bash(gcloud compute instances list:*)",
+      "Bash(gcloud compute scp:*)"
     ]
   }
 }

@@ -35,7 +35,10 @@ class AffinePoint {
     public:
     RingElement x;
     RingElement y;
-    
+
+    AffinePoint() = default;
+    AffinePoint(const RingElement &x_, const RingElement &y_) : x(x_), y(y_) {}
+
     INLINE AffinePoint ctime_select(bool selection, const AffinePoint &other) const {
         return AffinePoint(x.ctime_select(selection, other.x), y.ctime_select(selection, other.y));
     }
