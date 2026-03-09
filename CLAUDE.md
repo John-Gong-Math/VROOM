@@ -27,8 +27,13 @@ cd blst && make && cd ../src && make
 | `make test_inversion` | Inversion test (requires GMP) |
 | `make test_ec` | Elliptic curve test |
 | `make test_scalar_mult` | Scalar multiplication test |
+| `make test_msm` | MSM test (fallback) |
+| `make test_msm_avx` | MSM test (AVX512 IFMA) |
+| `make bench_msm` / `bench_msm_avx` | MSM benchmarks |
 
 Run a single test: `cd src && make test_pairing && ./test_pairing`
+
+Note: Building fallback (non-AVX) targets is significantly slower to compile than AVX targets.
 
 ### Compiler
 
@@ -68,6 +73,7 @@ Built as a tower of algebraic types, each templated on the ring:
 5. **Miller loop** (`miller.hpp`) — computes the Miller function
 6. **Final exponentiation** (`final_exponentiation.hpp`) — raises Miller output to the pairing power
 7. **Pairing** (`pairing.hpp`) — combines Miller loop + final exponentiation
+8. **MSM** — Multi-Scalar Multiplication via Pippenger's algorithm (`pippenger.hpp`, `msm.hpp`), using batch affine conversions (`batch_affine.hpp`, `batch_inversion.hpp`)
 
 ### CPU Layer (`cpu/`)
 
