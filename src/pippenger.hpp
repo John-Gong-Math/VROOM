@@ -272,37 +272,42 @@ typename Curve::ProjPoint pippenger_msm_parallel(
             th.join();
         }
 
-        // Merge thread buckets into thread 0
-        auto &merged = all_buckets[0];
-        auto &merged_occ = all_occupied[0];
+        // Integrate each thread's buckets independently, then combine per-thread
+        // window sums. This avoids a large number of extra projective bucket
+        // merges and keeps the aggregation path closer to the single-thread flow.
+        ProjPoint window_sum_total = curve.zero(ring);
+        bool window_initialized = false;
 
-        for (size_t t = 1; t < num_threads; t++) {
-            for (size_t b = 0; b < nbuckets; b++) {
-                if (!all_occupied[t][b]) continue;
-                if (!merged_occ[b]) {
-                    merged[b] = all_buckets[t][b];
-                    merged_occ[b] = 1;
-                } else {
-                    merged[b] = curve.add_point(merged[b], all_buckets[t][b], ring);
-                }
+        for (size_t t = 0; t < num_threads; t++) {
+            bool has_points = false;
+            for (size_t j = 0; j < nbuckets && !has_points; j++) {
+                if (all_occupied[t][j]) has_points = true;
+            }
+
+            if (!has_points) continue;
+
+            ProjPoint thread_window_sum = integrate_buckets(
+                curve,
+                ring,
+                all_buckets[t].data(),
+                all_occupied[t].data(),
+                nbuckets
+            );
+
+            if (!window_initialized) {
+                window_sum_total = thread_window_sum;
+                window_initialized = true;
+            } else {
+                window_sum_total = curve.add_point(window_sum_total, thread_window_sum, ring);
             }
         }
 
-        // Integrate merged buckets
-        bool has_points = false;
-        for (size_t j = 0; j < nbuckets && !has_points; j++) {
-            if (merged_occ[j]) has_points = true;
-        }
-
-        if (has_points) {
-            ProjPoint window_sum = integrate_buckets(curve, ring,
-                merged.data(), merged_occ.data(), nbuckets);
-
+        if (window_initialized) {
             if (!result_initialized) {
-                result = window_sum;
+                result = window_sum_total;
                 result_initialized = true;
             } else {
-                result = curve.add_point(result, window_sum, ring);
+                result = curve.add_point(result, window_sum_total, ring);
             }
         }
     }

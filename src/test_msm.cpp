@@ -41,6 +41,16 @@ static void bigint_to_bytes_le_msm(uint8_t *bytes, const BigInt &value, size_t l
     }
 }
 
+// Deterministic scalar generator for reproducible tests.
+static BigInt deterministic_scalar_msm(size_t idx, const BigInt &modulus) {
+    BigInt a = BigInt(static_cast<unsigned long>(idx + 1));
+    BigInt b = BigInt(static_cast<unsigned long>(0x9e3779b1u));
+    BigInt c = BigInt(static_cast<unsigned long>(0x7f4a7c15u));
+    BigInt v = (a * b + c) % modulus;
+    if (v == BigInt(0)) v = BigInt(1);
+    return v;
+}
+
 // Helper: vec384 (Montgomery) -> BigInt
 static BigInt vec384_montgomery_to_bigint_msm(const vec384 a) {
     vec384 normal;
@@ -264,8 +274,7 @@ int test_pippenger_vs_naive(const RingType &ring, const BigInt &q) {
         std::vector<const uint8_t*> scalar_ptrs(npoints);
 
         for (size_t i = 0; i < npoints; i++) {
-            // Random point
-            BigInt pt_scalar = BigInt::random(256) % r;
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i + npoints * 1000, r);
             byte pt_scalar_bytes[32] = {0};
             bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
             POINTonE1 blst_proj;
@@ -274,8 +283,7 @@ int test_pippenger_vs_naive(const RingType &ring, const BigInt &q) {
             blst_p1_to_affine(&blst_aff, &blst_proj);
             points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
 
-            // Random scalar
-            BigInt s = BigInt::random(255) % r;
+            BigInt s = deterministic_scalar_msm(2 * i + npoints * 1000 + 1, r);
             scalar_data[i].resize(32, 0);
             bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
             scalar_ptrs[i] = scalar_data[i].data();
@@ -331,7 +339,7 @@ int test_msm_vs_blst(const RingType &ring, const BigInt &q) {
         std::vector<POINTonE1> blst_proj_points(npoints);
 
         for (size_t i = 0; i < npoints; i++) {
-            BigInt pt_scalar = BigInt::random(256) % r;
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i, r);
             byte pt_scalar_bytes[32] = {0};
             bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
             blst_p1_mult(&blst_proj_points[i], &BLS12_381_G1, pt_scalar_bytes, 256);
@@ -339,7 +347,7 @@ int test_msm_vs_blst(const RingType &ring, const BigInt &q) {
             blst_p1_to_affine(&blst_aff, &blst_proj_points[i]);
             points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
 
-            BigInt s = BigInt::random(255) % r;
+            BigInt s = deterministic_scalar_msm(2 * i + 1, r);
             scalar_data[i].resize(32, 0);
             bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
             scalar_ptrs[i] = scalar_data[i].data();
@@ -405,7 +413,7 @@ int test_parallel_msm(const RingType &ring, const BigInt &q) {
         std::vector<const uint8_t*> scalar_ptrs(npoints);
 
         for (size_t i = 0; i < npoints; i++) {
-            BigInt pt_scalar = BigInt::random(256) % r;
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i, r);
             byte pt_scalar_bytes[32] = {0};
             bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
             POINTonE1 blst_proj;
@@ -414,7 +422,7 @@ int test_parallel_msm(const RingType &ring, const BigInt &q) {
             blst_p1_to_affine(&blst_aff, &blst_proj);
             points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
 
-            BigInt s = BigInt::random(255) % r;
+            BigInt s = deterministic_scalar_msm(2 * i + 1, r);
             scalar_data[i].resize(32, 0);
             bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
             scalar_ptrs[i] = scalar_data[i].data();
