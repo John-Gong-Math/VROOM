@@ -69,6 +69,14 @@ class AVXVector {
         }
     }
 
+    // Check if all limbs are zero (single VPTEST instruction per 512-bit vector).
+    inline bool is_zero() const {
+        for (int i = 0; i < VEC_LIMBS; i++) {
+            if (_mm512_test_epi64_mask(data[i], data[i]) != 0) return false;
+        }
+        return true;
+    }
+
     inline AVXVector permute(const AVXVector &perm) const {
         AVXVector out;
         for (int i = 0; i < VEC_LIMBS; i++) {

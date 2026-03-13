@@ -9,6 +9,7 @@ extern "C" {
 #include "../blst/ec_mult.h"
 }
 #include "msm.hpp"
+#include "pippenger_v2.hpp"
 #include "bounded_ring.hpp"
 #include "conversion_inversion.hpp"
 #include <vector>
@@ -80,7 +81,7 @@ static MSMTestData generate_test_data(const RingType &ring, size_t npoints) {
 
     for (size_t i = 0; i < npoints; i++) {
         // Generate point: random_scalar * G
-        BigInt pt_scalar = BigInt::random(256) % r;
+        BigInt pt_scalar = BigInt::random(BigInt(1) << 256) % r;
         if (pt_scalar == BigInt(0)) pt_scalar = BigInt(1);
         byte pt_scalar_bytes[32] = {0};
         bigint_to_bytes_le_bench(pt_scalar_bytes, pt_scalar, 32);
@@ -96,7 +97,7 @@ static MSMTestData generate_test_data(const RingType &ring, size_t npoints) {
             ring.from_bigint(x), ring.from_bigint(y));
 
         // Generate random scalar
-        BigInt s = BigInt::random(255) % r;
+        BigInt s = BigInt::random(BigInt(1) << 255) % r;
         data.scalar_data[i].resize(32, 0);
         bigint_to_bytes_le_bench(data.scalar_data[i].data(), s, 32);
         data.scalar_ptrs[i] = data.scalar_data[i].data();
@@ -165,9 +166,45 @@ static void BM_BLST_Pippenger(benchmark::State& state) {
     }
 }
 
+// ---- VROOM MSM v2 (batch affine) Benchmark ----
+
+static void BM_VROOM_MSM_V2(benchmark::State& state) {
+    size_t npoints = static_cast<size_t>(state.range(0));
+    BigInt q(bench_bls12_381_modulus_hex, 16);
+    RingType ring(q);
+
+    auto data = generate_test_data(ring, npoints);
+    benchmark::DoNotOptimize(data);
+
+    for (auto _ : state) {
+        auto result = msm_v2(ring, data.vroom_points.data(),
+                              data.scalar_ptrs.data(), npoints, 255);
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+// ---- VROOM MSM v2 Parallel (batch affine) Benchmark ----
+
+static void BM_VROOM_MSM_V2_Parallel(benchmark::State& state) {
+    size_t npoints = static_cast<size_t>(state.range(0));
+    BigInt q(bench_bls12_381_modulus_hex, 16);
+    RingType ring(q);
+
+    auto data = generate_test_data(ring, npoints);
+    benchmark::DoNotOptimize(data);
+
+    for (auto _ : state) {
+        auto result = msm_v2_parallel(ring, data.vroom_points.data(),
+                                       data.scalar_ptrs.data(), npoints, 255, 0);
+        benchmark::DoNotOptimize(result);
+    }
+}
+
 // Register benchmarks for 2^20 points
 BENCHMARK(BM_VROOM_MSM)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_VROOM_MSM_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_BLST_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_MSM_V2)->Arg(1048576)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_MSM_V2_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_MAIN();

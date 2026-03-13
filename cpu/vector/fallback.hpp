@@ -62,6 +62,14 @@ public:
         }
     }
 
+    // Check if all limbs are zero.
+    inline bool is_zero() const {
+        for (size_t i = 0; i < LIMBS_PER_VEC * VEC_LIMBS; i++) {
+            if (data[i] != 0) return false;
+        }
+        return true;
+    }
+
     inline constexpr AVXVector(const std::array<__m512i, VEC_LIMBS> &array) {
         union {
             __m512i m;

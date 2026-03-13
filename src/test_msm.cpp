@@ -8,6 +8,7 @@ extern "C" {
 #include "../blst/ec_mult.h"
 }
 #include "msm.hpp"
+#include "pippenger_v2.hpp"
 #include "batch_inversion.hpp"
 #include "batch_affine.hpp"
 #include "bounded_ring.hpp"
@@ -263,7 +264,7 @@ int test_pippenger_vs_naive(const RingType &ring, const BigInt &q) {
     BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
 
     // Test various sizes
-    std::vector<size_t> test_sizes = {1, 2, 4, 8, 16, 32, 64};
+    std::vector<size_t> test_sizes = {1, 2, 4, 8, 16, 32, 64, 256, 1024};
 
     for (size_t npoints : test_sizes) {
         std::cout << "  n=" << npoints << ": ";
@@ -328,7 +329,7 @@ int test_msm_vs_blst(const RingType &ring, const BigInt &q) {
 
     BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
 
-    std::vector<size_t> test_sizes = {1, 4, 16, 64};
+    std::vector<size_t> test_sizes = {1, 4, 16, 64, 256, 1024};
 
     for (size_t npoints : test_sizes) {
         std::cout << "  n=" << npoints << ": ";
@@ -582,6 +583,731 @@ int test_edge_cases(const RingType &ring, const BigInt &q) {
     return failed;
 }
 
+// ========================================================================
+// Test: XYZZ unit test (direct addition check)
+// ========================================================================
+template<class RingType>
+int test_xyzz_unit(const RingType &ring, const BigInt &q) {
+    std::cout << "=== Test: XYZZ Unit Test ===" << std::endl;
+    int passed = 0, failed = 0;
+
+    using CurveType = G1<RingType>;
+    using ProjPoint = typename CurveType::ProjPoint;
+    using AffPoint = typename CurveType::AffPoint;
+    using XYZZPt = typename CurveType::XYZZPt;
+    CurveType g1_curve;
+    BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
+
+    // Create two distinct affine points
+    byte s1_bytes[32] = {0}; s1_bytes[0] = 3;
+    byte s2_bytes[32] = {0}; s2_bytes[0] = 7;
+    POINTonE1 p1_proj, p2_proj;
+    blst_p1_mult(&p1_proj, &BLS12_381_G1, s1_bytes, 256);
+    blst_p1_mult(&p2_proj, &BLS12_381_G1, s2_bytes, 256);
+    POINTonE1_affine p1_aff, p2_aff;
+    blst_p1_to_affine(&p1_aff, &p1_proj);
+    blst_p1_to_affine(&p2_aff, &p2_proj);
+
+    auto pt1 = blst_g1_to_affine_point_msm(p1_aff, ring);
+    auto pt2 = blst_g1_to_affine_point_msm(p2_aff, ring);
+
+    // Test 1: XYZZAddAffine(from_affine(pt1), pt2) vs PointMixedAdd
+    {
+        std::cout << "  xyzz_add_affine vs mixed_add: ";
+        ProjPoint proj_result = g1_curve.add_mixed_point(
+            ProjPoint(pt1.x, pt1.y, ring.one()), pt2, ring);
+        auto [ex, ey] = proj_to_affine_bigint(proj_result, ring, q);
+
+        XYZZPt xyzz_pt = g1_curve.xyzz_from_affine(pt1, ring);
+        XYZZPt xyzz_sum = g1_curve.xyzz_add_affine(xyzz_pt, pt2, ring);
+        ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_sum, ring);
+        auto [ax, ay] = proj_to_affine_bigint(xyzz_proj, ring, q);
+
+        if (ax == ex && ay == ey) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    Expected: (" << ex.to_string(16) << ", " << ey.to_string(16) << ")" << std::endl;
+            std::cout << "    Got:      (" << ax.to_string(16) << ", " << ay.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    // Test 2: Multiple XYZZ + affine additions
+    {
+        std::cout << "  3 xyzz_add_affine chain: ";
+        byte s3_bytes[32] = {0}; s3_bytes[0] = 11;
+        POINTonE1 p3_proj;
+        blst_p1_mult(&p3_proj, &BLS12_381_G1, s3_bytes, 256);
+        POINTonE1_affine p3_aff;
+        blst_p1_to_affine(&p3_aff, &p3_proj);
+        auto pt3 = blst_g1_to_affine_point_msm(p3_aff, ring);
+
+        // Projective chain
+        ProjPoint proj_acc = ProjPoint(pt1.x, pt1.y, ring.one());
+        proj_acc = g1_curve.add_mixed_point(proj_acc, pt2, ring);
+        proj_acc = g1_curve.add_mixed_point(proj_acc, pt3, ring);
+        auto [ex, ey] = proj_to_affine_bigint(proj_acc, ring, q);
+
+        // XYZZ chain
+        XYZZPt xyzz_acc = g1_curve.xyzz_from_affine(pt1, ring);
+        xyzz_acc = g1_curve.xyzz_add_affine(xyzz_acc, pt2, ring);
+        xyzz_acc = g1_curve.xyzz_add_affine(xyzz_acc, pt3, ring);
+        ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_acc, ring);
+        auto [ax, ay] = proj_to_affine_bigint(xyzz_proj, ring, q);
+
+        if (ax == ex && ay == ey) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    Expected: (" << ex.to_string(16) << ", " << ey.to_string(16) << ")" << std::endl;
+            std::cout << "    Got:      (" << ax.to_string(16) << ", " << ay.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    // Test 3: XYZZ + XYZZ
+    {
+        std::cout << "  xyzz_add (XYZZ+XYZZ): ";
+        // Build two XYZZ points with non-trivial Z
+        XYZZPt xyzz1 = g1_curve.xyzz_from_affine(pt1, ring);
+        xyzz1 = g1_curve.xyzz_add_affine(xyzz1, pt2, ring);
+
+        byte s4_bytes[32] = {0}; s4_bytes[0] = 13;
+        POINTonE1 p4_proj;
+        blst_p1_mult(&p4_proj, &BLS12_381_G1, s4_bytes, 256);
+        POINTonE1_affine p4_aff;
+        blst_p1_to_affine(&p4_aff, &p4_proj);
+        auto pt4 = blst_g1_to_affine_point_msm(p4_aff, ring);
+
+        XYZZPt xyzz2 = g1_curve.xyzz_from_affine(pt2, ring);
+        xyzz2 = g1_curve.xyzz_add_affine(xyzz2, pt4, ring);
+
+        // XYZZ + XYZZ
+        XYZZPt xyzz_sum = g1_curve.xyzz_add(xyzz1, xyzz2, ring);
+        ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_sum, ring);
+        auto [ax, ay] = proj_to_affine_bigint(xyzz_proj, ring, q);
+
+        // Reference: projective
+        ProjPoint proj1 = g1_curve.xyzz_to_proj(xyzz1, ring);
+        ProjPoint proj2 = g1_curve.xyzz_to_proj(xyzz2, ring);
+        ProjPoint proj_sum = g1_curve.add_point(proj1, proj2, ring);
+        auto [ex, ey] = proj_to_affine_bigint(proj_sum, ring, q);
+
+        if (ax == ex && ay == ey) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    Expected: (" << ex.to_string(16) << ", " << ey.to_string(16) << ")" << std::endl;
+            std::cout << "    Got:      (" << ax.to_string(16) << ", " << ay.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    // Test 4: xyzz_to_proj for trivial XYZZ (ZZ=1, ZZZ=1)
+    {
+        std::cout << "  xyzz_to_proj trivial: ";
+        XYZZPt xyzz_triv = g1_curve.xyzz_from_affine(pt1, ring);
+        ProjPoint proj = g1_curve.xyzz_to_proj(xyzz_triv, ring);
+        auto [ax, ay] = proj_to_affine_bigint(proj, ring, q);
+        BigInt ex = vec384_montgomery_to_bigint_msm(p1_aff.X);
+        BigInt ey = vec384_montgomery_to_bigint_msm(p1_aff.Y);
+        if (ax == ex && ay == ey) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    Expected: (" << ex.to_string(16) << ", " << ey.to_string(16) << ")" << std::endl;
+            std::cout << "    Got:      (" << ax.to_string(16) << ", " << ay.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    // Test 5: Long chain (10 points) with negation, mimicking Pippenger bucket
+    {
+        std::cout << "  10-point chain with negation: ";
+        const int N = 10;
+        std::vector<AffPoint> chain_pts(N);
+        std::vector<bool> chain_neg(N);
+
+        // Create random points
+        for (int i = 0; i < N; i++) {
+            byte s_bytes[32] = {0};
+            BigInt s_val = BigInt::random(BigInt(1) << 200) % r;
+            if (s_val == BigInt(0)) s_val = BigInt(1);
+            bigint_to_bytes_le_msm(s_bytes, s_val, 32);
+            POINTonE1 proj;
+            blst_p1_mult(&proj, &BLS12_381_G1, s_bytes, 256);
+            POINTonE1_affine aff;
+            blst_p1_to_affine(&aff, &proj);
+            chain_pts[i] = blst_g1_to_affine_point_msm(aff, ring);
+            chain_neg[i] = (i % 3 == 1); // Negate every 3rd point
+        }
+
+        // XYZZ chain
+        XYZZPt xyzz_acc = g1_curve.xyzz_from_affine(
+            chain_neg[0] ? g1_curve.negate_affine(chain_pts[0], ring) : chain_pts[0], ring);
+        for (int i = 1; i < N; i++) {
+            AffPoint pt = chain_neg[i] ? g1_curve.negate_affine(chain_pts[i], ring) : chain_pts[i];
+            xyzz_acc = g1_curve.xyzz_add_affine(xyzz_acc, pt, ring);
+        }
+        ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_acc, ring);
+        auto [ax, ay] = proj_to_affine_bigint(xyzz_proj, ring, q);
+
+        // Projective chain
+        AffPoint first = chain_neg[0] ? g1_curve.negate_affine(chain_pts[0], ring) : chain_pts[0];
+        ProjPoint proj_acc = ProjPoint(first.x, first.y, ring.one());
+        for (int i = 1; i < N; i++) {
+            AffPoint pt = chain_neg[i] ? g1_curve.negate_affine(chain_pts[i], ring) : chain_pts[i];
+            proj_acc = g1_curve.add_mixed_point(proj_acc, pt, ring);
+        }
+        auto [ex, ey] = proj_to_affine_bigint(proj_acc, ring, q);
+
+        if (ax == ex && ay == ey) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    Expected: (" << ex.to_string(16) << ", " << ey.to_string(16) << ")" << std::endl;
+            std::cout << "    Got:      (" << ax.to_string(16) << ", " << ay.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    // Test 6: Stress test - multiple random chains of varying lengths
+    {
+        std::cout << "  stress test (20 chains of 2-15 points): ";
+        bool all_ok = true;
+        int chain_fails = 0;
+        for (int c = 0; c < 20 && all_ok; c++) {
+            int chain_len = 2 + (c * 7 + 3) % 14; // Deterministic varying lengths 2-15
+            std::vector<AffPoint> pts(chain_len);
+            for (int i = 0; i < chain_len; i++) {
+                byte s_bytes[32] = {0};
+                BigInt s_val = BigInt::random(BigInt(1) << 250) % r;
+                if (s_val == BigInt(0)) s_val = BigInt(1);
+                bigint_to_bytes_le_msm(s_bytes, s_val, 32);
+                POINTonE1 proj;
+                blst_p1_mult(&proj, &BLS12_381_G1, s_bytes, 256);
+                POINTonE1_affine aff;
+                blst_p1_to_affine(&aff, &proj);
+                pts[i] = blst_g1_to_affine_point_msm(aff, ring);
+            }
+
+            // XYZZ
+            XYZZPt xyzz_acc = g1_curve.xyzz_from_affine(pts[0], ring);
+            for (int i = 1; i < chain_len; i++) {
+                xyzz_acc = g1_curve.xyzz_add_affine(xyzz_acc, pts[i], ring);
+            }
+            ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_acc, ring);
+            auto [ax2, ay2] = proj_to_affine_bigint(xyzz_proj, ring, q);
+
+            // Projective
+            ProjPoint proj_acc = ProjPoint(pts[0].x, pts[0].y, ring.one());
+            for (int i = 1; i < chain_len; i++) {
+                proj_acc = g1_curve.add_mixed_point(proj_acc, pts[i], ring);
+            }
+            auto [ex2, ey2] = proj_to_affine_bigint(proj_acc, ring, q);
+
+            if (ax2 != ex2 || ay2 != ey2) {
+                all_ok = false;
+                chain_fails++;
+                std::cout << "FAIL (chain " << c << ", len=" << chain_len << ")" << std::endl;
+                std::cout << "    Expected: (" << ex2.to_string(16) << ", " << ey2.to_string(16) << ")" << std::endl;
+                std::cout << "    Got:      (" << ax2.to_string(16) << ", " << ay2.to_string(16) << ")" << std::endl;
+            }
+        }
+        if (all_ok) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+        }
+    }
+
+    std::cout << "  Passed: " << passed << ", Failed: " << failed << std::endl;
+    if (failed == 0) std::cout << "  All XYZZ unit tests passed!" << std::endl;
+    std::cout << std::endl;
+    return failed;
+}
+
+// Focused debug test: per-bucket XYZZ vs ProjPoint comparison for n=32
+template<class RingType>
+int test_xyzz_scatter_debug(const RingType &ring, const BigInt &q) {
+    std::cout << "=== Test: XYZZ Scatter Debug (n=32) ===" << std::endl;
+    int passed = 0, failed = 0;
+
+    using CurveType = G1<RingType>;
+    using ProjPoint = typename CurveType::ProjPoint;
+    using AffPoint = typename CurveType::AffPoint;
+    using XYZZPt = typename CurveType::XYZZPt;
+    CurveType g1_curve;
+    BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
+
+    const size_t npoints = 1024;
+    const size_t scalar_bits = 255;
+
+    // Generate same data as Pippenger vs Naive test
+    std::vector<AffPoint> points(npoints);
+    std::vector<std::vector<uint8_t>> scalar_data(npoints);
+    std::vector<const uint8_t*> scalar_ptrs(npoints);
+
+    for (size_t i = 0; i < npoints; i++) {
+        BigInt pt_scalar = deterministic_scalar_msm(2 * i, r);
+        byte pt_scalar_bytes[32] = {0};
+        bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
+        POINTonE1 blst_proj;
+        blst_p1_mult(&blst_proj, &BLS12_381_G1, pt_scalar_bytes, 256);
+        POINTonE1_affine blst_aff;
+        blst_p1_to_affine(&blst_aff, &blst_proj);
+        points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
+
+        BigInt s = deterministic_scalar_msm(2 * i + 1, r);
+        scalar_data[i].resize(32, 0);
+        bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
+        scalar_ptrs[i] = scalar_data[i].data();
+    }
+
+    size_t wbits = choose_wbits(npoints);
+    size_t nbuckets = 1u << (wbits - 1);
+    size_t scalar_bytes = (scalar_bits + 7) / 8;
+    size_t num_windows = (scalar_bits + wbits - 1) / wbits + 1;
+
+    std::cout << "  wbits=" << wbits << " nbuckets=" << nbuckets << " windows=" << num_windows << std::endl;
+
+    // Booth encode
+    std::vector<int32_t> digits(num_windows * npoints);
+    booth_encode_scalars(scalar_ptrs.data(), npoints, scalar_bytes, wbits, num_windows, digits.data());
+
+    // For each window that has points, compare per-bucket results
+    bool any_bucket_mismatch = false;
+    size_t first_bad_window = 0, first_bad_bucket = 0;
+
+    for (size_t w = 0; w < num_windows && !any_bucket_mismatch; w++) {
+        const int32_t *win_digits = digits.data() + w * npoints;
+
+        // Check if this window has any non-zero digits
+        bool has_digits = false;
+        for (size_t i = 0; i < npoints; i++) {
+            if (win_digits[i] != 0) { has_digits = true; break; }
+        }
+        if (!has_digits) continue;
+
+        // XYZZ scatter
+        std::vector<XYZZPt> xyzz_buckets(nbuckets, g1_curve.xyzz_zero(ring));
+        std::vector<uint8_t> xyzz_occ(nbuckets, 0);
+        scatter_chunk(g1_curve, ring, points.data(), win_digits, 0, npoints,
+                      xyzz_buckets.data(), xyzz_occ.data(), nbuckets);
+
+        // ProjPoint scatter
+        std::vector<ProjPoint> proj_buckets(nbuckets, g1_curve.zero(ring));
+        std::vector<uint8_t> proj_occ(nbuckets, 0);
+        for (size_t i = 0; i < npoints; i++) {
+            int32_t digit = win_digits[i];
+            if (digit == 0) continue;
+            bool neg = digit < 0;
+            size_t bidx = static_cast<size_t>(neg ? -digit : digit) - 1;
+            AffPoint pt = points[i];
+            if (neg) pt = g1_curve.negate_affine(pt, ring);
+            if (!proj_occ[bidx]) {
+                proj_buckets[bidx] = ProjPoint(pt.x, pt.y, ring.one());
+                proj_occ[bidx] = 1;
+            } else {
+                proj_buckets[bidx] = g1_curve.add_mixed_point(proj_buckets[bidx], pt, ring);
+            }
+        }
+
+        // Compare each bucket
+        for (size_t j = 0; j < nbuckets; j++) {
+            if (xyzz_occ[j] != proj_occ[j]) {
+                std::cout << "  [w=" << w << " b=" << j << "] occ mismatch: xyzz=" << (int)xyzz_occ[j] << " proj=" << (int)proj_occ[j] << std::endl;
+                any_bucket_mismatch = true;
+                first_bad_window = w; first_bad_bucket = j;
+                break;
+            }
+            if (!xyzz_occ[j]) continue;
+
+            // Convert both to affine
+            ProjPoint xyzz_proj = g1_curve.xyzz_to_proj(xyzz_buckets[j], ring);
+            auto [xyzz_x, xyzz_y] = proj_to_affine_bigint(xyzz_proj, ring, q);
+            auto [proj_x, proj_y] = proj_to_affine_bigint(proj_buckets[j], ring, q);
+
+            if (xyzz_x != proj_x || xyzz_y != proj_y) {
+                any_bucket_mismatch = true;
+                first_bad_window = w; first_bad_bucket = j;
+
+                // Count how many points went into this bucket
+                size_t pts_in_bucket = 0;
+                for (size_t i = 0; i < npoints; i++) {
+                    int32_t d = win_digits[i];
+                    if (d == 0) continue;
+                    size_t bi = static_cast<size_t>(d < 0 ? -d : d) - 1;
+                    if (bi == j) pts_in_bucket++;
+                }
+
+                std::cout << "  [w=" << w << " b=" << j << "] VALUE MISMATCH (" << pts_in_bucket << " points in bucket)" << std::endl;
+                std::cout << "    XYZZ:  (" << xyzz_x.to_string(16) << ", " << xyzz_y.to_string(16) << ")" << std::endl;
+                std::cout << "    Proj:  (" << proj_x.to_string(16) << ", " << proj_y.to_string(16) << ")" << std::endl;
+
+                // Trace the additions one by one for this bucket
+                XYZZPt trace_xyzz = g1_curve.xyzz_zero(ring);
+                ProjPoint trace_proj = g1_curve.zero(ring);
+                bool first = true;
+                int pt_idx = 0;
+                for (size_t i = 0; i < npoints; i++) {
+                    int32_t d = win_digits[i];
+                    if (d == 0) continue;
+                    size_t bi = static_cast<size_t>(d < 0 ? -d : d) - 1;
+                    if (bi != j) continue;
+
+                    AffPoint pt = points[i];
+                    if (d < 0) pt = g1_curve.negate_affine(pt, ring);
+
+                    if (first) {
+                        trace_xyzz = g1_curve.xyzz_from_affine(pt, ring);
+                        trace_proj = ProjPoint(pt.x, pt.y, ring.one());
+                        first = false;
+                    } else {
+                        trace_xyzz = g1_curve.xyzz_add_affine(trace_xyzz, pt, ring);
+                        trace_proj = g1_curve.add_mixed_point(trace_proj, pt, ring);
+                    }
+
+                    // Compare after each addition
+                    ProjPoint trace_xyzz_proj = g1_curve.xyzz_to_proj(trace_xyzz, ring);
+                    auto [tx, ty] = proj_to_affine_bigint(trace_xyzz_proj, ring, q);
+                    auto [px, py] = proj_to_affine_bigint(trace_proj, ring, q);
+                    if (tx != px || ty != py) {
+                        std::cout << "    DIVERGES at point " << pt_idx << " (global i=" << i << ", digit=" << d << ")" << std::endl;
+                        std::cout << "      XYZZ after: (" << tx.to_string(16) << ")" << std::endl;
+                        std::cout << "      Proj after: (" << px.to_string(16) << ")" << std::endl;
+
+                        // Print the XYZZ state BEFORE this addition
+                        // Re-trace to get state before the failing point
+                        XYZZPt pre_xyzz = g1_curve.xyzz_zero(ring);
+                        bool pre_first = true;
+                        for (size_t ii = 0; ii < i; ii++) {
+                            int32_t dd = win_digits[ii];
+                            if (dd == 0) continue;
+                            size_t bbi = static_cast<size_t>(dd < 0 ? -dd : dd) - 1;
+                            if (bbi != j) continue;
+                            AffPoint ppt = points[ii];
+                            if (dd < 0) ppt = g1_curve.negate_affine(ppt, ring);
+                            if (pre_first) {
+                                pre_xyzz = g1_curve.xyzz_from_affine(ppt, ring);
+                                pre_first = false;
+                            } else {
+                                pre_xyzz = g1_curve.xyzz_add_affine(pre_xyzz, ppt, ring);
+                            }
+                        }
+                        // Check H = x2 * ZZ - X
+                        auto pre_aff_proj = g1_curve.xyzz_to_proj(pre_xyzz, ring);
+                        auto [pre_ax, pre_ay] = proj_to_affine_bigint(pre_aff_proj, ring, q);
+                        BigInt pt_x = ring.to_bigint(pt.x);
+                        std::cout << "      Pre-XYZZ affine x: " << pre_ax.to_string(16) << std::endl;
+                        std::cout << "      New point x:       " << pt_x.to_string(16) << std::endl;
+                        std::cout << "      Same x? " << (pre_ax == pt_x ? "YES (degenerate!)" : "NO") << std::endl;
+
+                        // Also check Pre-XYZZ ZZ and ZZZ
+                        BigInt zz_val = ring.to_bigint(pre_xyzz.ZZ);
+                        BigInt zzz_val = ring.to_bigint(pre_xyzz.ZZZ);
+                        std::cout << "      ZZ:  " << zz_val.to_string(16) << std::endl;
+                        std::cout << "      ZZZ: " << zzz_val.to_string(16) << std::endl;
+
+                        // Compute H = pt.x * ZZ - X explicitly
+                        BigInt xyzz_X = ring.to_bigint(pre_xyzz.X);
+                        BigInt H = (pt_x * zz_val - xyzz_X) % q;
+                        if (H < 0) H = H + q;
+                        std::cout << "      H = x2*ZZ - X = " << H.to_string(16) << std::endl;
+
+                        break;
+                    }
+                    pt_idx++;
+                }
+                break;
+            }
+        }
+    }
+
+    if (!any_bucket_mismatch) {
+        std::cout << "  All buckets match! Testing per-window integration..." << std::endl;
+
+        // Compare per-window integration: XYZZ→Proj vs ProjPoint directly
+        bool integration_mismatch = false;
+        for (size_t w = 0; w < num_windows && !integration_mismatch; w++) {
+            const int32_t *win_digits = digits.data() + w * npoints;
+
+            // XYZZ scatter
+            std::vector<XYZZPt> xyzz_bkts(nbuckets, g1_curve.xyzz_zero(ring));
+            std::vector<uint8_t> xyzz_occ(nbuckets, 0);
+            scatter_chunk(g1_curve, ring, points.data(), win_digits, 0, npoints,
+                          xyzz_bkts.data(), xyzz_occ.data(), nbuckets);
+
+            // ProjPoint scatter
+            std::vector<ProjPoint> proj_bkts(nbuckets, g1_curve.zero(ring));
+            std::vector<uint8_t> proj_occ(nbuckets, 0);
+            for (size_t i = 0; i < npoints; i++) {
+                int32_t digit = win_digits[i];
+                if (digit == 0) continue;
+                bool neg = digit < 0;
+                size_t bidx = static_cast<size_t>(neg ? -digit : digit) - 1;
+                AffPoint pt = points[i];
+                if (neg) pt = g1_curve.negate_affine(pt, ring);
+                if (!proj_occ[bidx]) {
+                    proj_bkts[bidx] = ProjPoint(pt.x, pt.y, ring.one());
+                    proj_occ[bidx] = 1;
+                } else {
+                    proj_bkts[bidx] = g1_curve.add_mixed_point(proj_bkts[bidx], pt, ring);
+                }
+            }
+
+            bool has_pts = false;
+            for (size_t j = 0; j < nbuckets; j++) {
+                if (xyzz_occ[j]) { has_pts = true; break; }
+            }
+            if (!has_pts) continue;
+
+            // Integrate XYZZ (via xyzz_to_proj + add_point)
+            ProjPoint xyzz_wsum = integrate_buckets(g1_curve, ring,
+                xyzz_bkts.data(), xyzz_occ.data(), nbuckets);
+
+            // Integrate ProjPoint directly
+            ProjPoint proj_wsum = g1_curve.zero(ring);
+            {
+                ProjPoint running = g1_curve.zero(ring);
+                bool r_started = false, w_started = false;
+                for (size_t j = nbuckets; j-- > 0; ) {
+                    if (proj_occ[j]) {
+                        if (!r_started) {
+                            running = proj_bkts[j];
+                            r_started = true;
+                        } else {
+                            running = g1_curve.add_point(running, proj_bkts[j], ring);
+                        }
+                    }
+                    if (r_started) {
+                        if (!w_started) {
+                            proj_wsum = running;
+                            w_started = true;
+                        } else {
+                            proj_wsum = g1_curve.add_point(proj_wsum, running, ring);
+                        }
+                    }
+                }
+            }
+
+            auto [xwx, xwy] = proj_to_affine_bigint(xyzz_wsum, ring, q);
+            auto [pwx, pwy] = proj_to_affine_bigint(proj_wsum, ring, q);
+
+            if (xwx != pwx || xwy != pwy) {
+                integration_mismatch = true;
+                std::cout << "  Window " << w << " integration MISMATCH:" << std::endl;
+                std::cout << "    XYZZ: (" << xwx.to_string(16) << ")" << std::endl;
+                std::cout << "    Proj: (" << pwx.to_string(16) << ")" << std::endl;
+
+                // Now trace the integration step by step
+                ProjPoint xyzz_running = g1_curve.zero(ring);
+                ProjPoint proj_running = g1_curve.zero(ring);
+                ProjPoint xyzz_ws = g1_curve.zero(ring);
+                ProjPoint proj_ws = g1_curve.zero(ring);
+                bool xr = false, pr = false, xw = false, pw = false;
+
+                for (size_t j = nbuckets; j-- > 0; ) {
+                    if (xyzz_occ[j]) {
+                        auto bp = g1_curve.xyzz_to_proj(xyzz_bkts[j], ring);
+                        if (!xr) {
+                            xyzz_running = bp; xr = true;
+                        } else {
+                            xyzz_running = g1_curve.add_point(xyzz_running, bp, ring);
+                        }
+                    }
+                    if (proj_occ[j]) {
+                        if (!pr) {
+                            proj_running = proj_bkts[j]; pr = true;
+                        } else {
+                            proj_running = g1_curve.add_point(proj_running, proj_bkts[j], ring);
+                        }
+                    }
+                    if (xr) {
+                        if (!xw) { xyzz_ws = xyzz_running; xw = true; }
+                        else xyzz_ws = g1_curve.add_point(xyzz_ws, xyzz_running, ring);
+                    }
+                    if (pr) {
+                        if (!pw) { proj_ws = proj_running; pw = true; }
+                        else proj_ws = g1_curve.add_point(proj_ws, proj_running, ring);
+                    }
+
+                    // Compare running sums after each bucket
+                    if (xr && pr) {
+                        auto [xrx, xry] = proj_to_affine_bigint(xyzz_running, ring, q);
+                        auto [prx, pry] = proj_to_affine_bigint(proj_running, ring, q);
+                        if (xrx != prx || xry != pry) {
+                            std::cout << "    Running sum diverges at bucket " << j << std::endl;
+                            std::cout << "      XYZZ running: (" << xrx.to_string(16) << ")" << std::endl;
+                            std::cout << "      Proj running: (" << prx.to_string(16) << ")" << std::endl;
+
+                            // Check the bucket itself
+                            auto bp = g1_curve.xyzz_to_proj(xyzz_bkts[j], ring);
+                            auto [bx, by] = proj_to_affine_bigint(bp, ring, q);
+                            auto [bpx, bpy] = proj_to_affine_bigint(proj_bkts[j], ring, q);
+                            std::cout << "      XYZZ bucket[" << j << "]: (" << bx.to_string(16) << ")" << std::endl;
+                            std::cout << "      Proj bucket[" << j << "]: (" << bpx.to_string(16) << ")" << std::endl;
+                            break;
+                        }
+                    }
+                }
+                failed++;
+            }
+        }
+
+        if (!integration_mismatch) {
+            std::cout << "  Per-window integration matches! Checking full accumulation..." << std::endl;
+            // If per-window integration matches, the bug is in the main loop
+            // (doubling or window accumulation)
+            passed++;
+        }
+    } else {
+        failed++;
+    }
+
+    std::cout << "  Passed: " << passed << ", Failed: " << failed << std::endl;
+    std::cout << std::endl;
+    return failed;
+}
+
+// ========================================================================
+// Test: Pippenger V2 (batch affine schedule) vs naive MSM
+// ========================================================================
+template<class RingType>
+int test_pippenger_v2_vs_naive(const RingType &ring, const BigInt &q) {
+    std::cout << "=== Test: Pippenger V2 (batch affine) vs Naive MSM ===" << std::endl;
+    int passed = 0, failed = 0;
+
+    using CurveType = G1<RingType>;
+    using AffPoint = typename CurveType::AffPoint;
+    CurveType g1_curve;
+
+    BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
+
+    std::vector<size_t> test_sizes = {1, 2, 4, 8, 16, 32, 64, 256};
+
+    for (size_t npoints : test_sizes) {
+        std::cout << "  n=" << npoints << ": ";
+
+        std::vector<AffPoint> points(npoints);
+        std::vector<std::vector<uint8_t>> scalar_data(npoints);
+        std::vector<const uint8_t*> scalar_ptrs(npoints);
+
+        for (size_t i = 0; i < npoints; i++) {
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i + npoints * 2000, r);
+            byte pt_scalar_bytes[32] = {0};
+            bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
+            POINTonE1 blst_proj;
+            blst_p1_mult(&blst_proj, &BLS12_381_G1, pt_scalar_bytes, 256);
+            POINTonE1_affine blst_aff;
+            blst_p1_to_affine(&blst_aff, &blst_proj);
+            points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
+
+            BigInt s = deterministic_scalar_msm(2 * i + npoints * 2000 + 1, r);
+            scalar_data[i].resize(32, 0);
+            bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
+            scalar_ptrs[i] = scalar_data[i].data();
+        }
+
+        // Compute with V2 (no Curve template — uses Ring directly)
+        auto v2_result = msm_v2(ring, points.data(),
+                                 scalar_ptrs.data(), npoints, 255);
+        auto [v2_x, v2_y] = proj_to_affine_bigint(v2_result, ring, q);
+
+        // Compute naive
+        auto naive_result = naive_msm(g1_curve, ring, points.data(),
+                                       scalar_ptrs.data(), npoints, 255);
+        auto [naive_x, naive_y] = proj_to_affine_bigint(naive_result, ring, q);
+
+        if (v2_x == naive_x && v2_y == naive_y) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    V2:    (" << v2_x.to_string(16) << ", " << v2_y.to_string(16) << ")" << std::endl;
+            std::cout << "    Naive: (" << naive_x.to_string(16) << ", " << naive_y.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    std::cout << "  Passed: " << passed << ", Failed: " << failed << std::endl;
+    if (failed == 0) std::cout << "  All Pippenger V2 vs Naive tests passed!" << std::endl;
+    std::cout << std::endl;
+    return failed;
+}
+
+// ========================================================================
+// Test: Pippenger V2 parallel vs single-threaded
+// ========================================================================
+template<class RingType>
+int test_pippenger_v2_parallel(const RingType &ring, const BigInt &q) {
+    std::cout << "=== Test: Pippenger V2 Parallel vs Single-threaded ===" << std::endl;
+    int passed = 0, failed = 0;
+
+    using CurveType = G1<RingType>;
+    using AffPoint = typename CurveType::AffPoint;
+
+    BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
+
+    std::vector<size_t> test_sizes = {64, 256, 1024};
+
+    for (size_t npoints : test_sizes) {
+        std::cout << "  n=" << npoints << ": ";
+
+        std::vector<AffPoint> points(npoints);
+        std::vector<std::vector<uint8_t>> scalar_data(npoints);
+        std::vector<const uint8_t*> scalar_ptrs(npoints);
+
+        for (size_t i = 0; i < npoints; i++) {
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i, r);
+            byte pt_scalar_bytes[32] = {0};
+            bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
+            POINTonE1 blst_proj;
+            blst_p1_mult(&blst_proj, &BLS12_381_G1, pt_scalar_bytes, 256);
+            POINTonE1_affine blst_aff;
+            blst_p1_to_affine(&blst_aff, &blst_proj);
+            points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
+
+            BigInt s = deterministic_scalar_msm(2 * i + 1, r);
+            scalar_data[i].resize(32, 0);
+            bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
+            scalar_ptrs[i] = scalar_data[i].data();
+        }
+
+        // Single-threaded V2
+        auto st_result = msm_v2(ring, points.data(),
+                                 scalar_ptrs.data(), npoints, 255);
+        auto [st_x, st_y] = proj_to_affine_bigint(st_result, ring, q);
+
+        // Multi-threaded V2
+        auto mt_result = msm_v2_parallel(ring, points.data(),
+                                          scalar_ptrs.data(), npoints, 255, 2);
+        auto [mt_x, mt_y] = proj_to_affine_bigint(mt_result, ring, q);
+
+        if (st_x == mt_x && st_y == mt_y) {
+            passed++;
+            std::cout << "PASS" << std::endl;
+        } else {
+            failed++;
+            std::cout << "FAIL" << std::endl;
+            std::cout << "    ST: (" << st_x.to_string(16) << ")" << std::endl;
+            std::cout << "    MT: (" << mt_x.to_string(16) << ")" << std::endl;
+        }
+    }
+
+    std::cout << "  Passed: " << passed << ", Failed: " << failed << std::endl;
+    if (failed == 0) std::cout << "  All Pippenger V2 Parallel tests passed!" << std::endl;
+    std::cout << std::endl;
+    return failed;
+}
+
 int main() {
     try {
         BigInt q(bls12_381_modulus_hex_msm, 16);
@@ -593,11 +1319,14 @@ int main() {
         std::cout << "================================================" << std::endl << std::endl;
 
         int total_failures = 0;
+        total_failures += test_xyzz_unit(ring, q);
         total_failures += test_batch_invert(ring, q);
         total_failures += test_batch_to_affine(ring, q);
         total_failures += test_pippenger_vs_naive(ring, q);
         total_failures += test_parallel_msm(ring, q);
         total_failures += test_msm_vs_blst(ring, q);
+        total_failures += test_pippenger_v2_vs_naive(ring, q);
+        total_failures += test_pippenger_v2_parallel(ring, q);
         total_failures += test_edge_cases(ring, q);
 
         std::cout << "================================================" << std::endl;

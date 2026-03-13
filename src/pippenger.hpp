@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <thread>
 #include <atomic>
-#include <cstring>
 
 // Pippenger bucket method MSM for G1.
 // Uses Booth (signed digit) encoding to halve bucket count, improving cache
@@ -71,6 +70,7 @@ inline void booth_encode_scalars(
 }
 
 // Scatter with Booth-encoded (signed) digits and prefetching.
+// Uses XYZZ buckets for cheaper mixed addition (no mul_3b).
 // digits points to the start of this window's digit array (size >= end).
 template<class Curve, class Ring>
 void scatter_chunk(
@@ -79,11 +79,10 @@ void scatter_chunk(
     const typename Curve::AffPoint *points,
     const int32_t *digits,
     size_t start, size_t end,
-    typename Curve::ProjPoint *buckets,
+    typename Curve::XYZZPt *buckets,
     uint8_t *occupied,
     size_t /*nbuckets*/
 ) {
-    using ProjPoint = typename Curve::ProjPoint;
     using AffPoint = typename Curve::AffPoint;
 
     static constexpr size_t PREFETCH_AHEAD = 4;
@@ -98,6 +97,8 @@ void scatter_chunk(
                 __builtin_prefetch(&buckets[future_bidx], 1, 1);
                 __builtin_prefetch(
                     reinterpret_cast<const char*>(&buckets[future_bidx]) + 64, 1, 1);
+                __builtin_prefetch(
+                    reinterpret_cast<const char*>(&buckets[future_bidx]) + 128, 1, 1);
                 __builtin_prefetch(&occupied[future_bidx], 1, 1);
             }
         }
@@ -114,20 +115,30 @@ void scatter_chunk(
         }
 
         if (!occupied[bidx]) {
-            buckets[bidx] = ProjPoint(pt.x, pt.y, ring.one());
+            buckets[bidx] = curve.xyzz_from_affine(pt, ring);
             occupied[bidx] = 1;
         } else {
-            buckets[bidx] = curve.add_mixed_point(buckets[bidx], pt, ring);
+            // Check if bucket is identity (ZZ=0) from prior point cancellation.
+            // xyzz_add_affine degenerates when ZZ=0: ZZ3=ZZ*HH=0 traps at identity.
+            if (Ring::is_zero(buckets[bidx].ZZ)) {
+                buckets[bidx] = curve.xyzz_from_affine(pt, ring);
+            } else {
+                buckets[bidx] = curve.xyzz_add_affine(buckets[bidx], pt, ring);
+            }
         }
     }
 }
 
-// Integrate buckets using running sum (summation by parts).
+// Integrate XYZZ buckets using running sum (summation by parts).
+// Converts each XYZZ bucket to ProjPoint and uses the complete PointAdd
+// (Algorithm 7) for accumulation. This avoids the XYZZ addition formula's
+// degeneration when P == Q (which happens regularly during integration when
+// running_sum is added to window_sum without being updated between steps).
 template<class Curve, class Ring>
 typename Curve::ProjPoint integrate_buckets(
     const Curve &curve,
     const Ring &ring,
-    typename Curve::ProjPoint *buckets,
+    typename Curve::XYZZPt *buckets,
     const uint8_t *occupied,
     size_t nbuckets
 ) {
@@ -140,11 +151,17 @@ typename Curve::ProjPoint integrate_buckets(
 
     for (size_t j = nbuckets; j-- > 0; ) {
         if (occupied[j]) {
-            if (!running_started) {
-                running_sum = buckets[j];
-                running_started = true;
-            } else {
-                running_sum = curve.add_point(running_sum, buckets[j], ring);
+            // Skip identity buckets (ZZ=0 from point cancellation, e.g. P + (-P)).
+            // xyzz_to_proj maps identity XYZZ to (0,0,0) which is invalid for
+            // Algorithm 7's complete addition.
+            if (!Ring::is_zero(buckets[j].ZZ)) {
+                if (!running_started) {
+                    running_sum = curve.xyzz_to_proj(buckets[j], ring);
+                    running_started = true;
+                } else {
+                    auto bucket_proj = curve.xyzz_to_proj(buckets[j], ring);
+                    running_sum = curve.add_point(running_sum, bucket_proj, ring);
+                }
             }
         }
         if (running_started) {
@@ -186,8 +203,9 @@ typename Curve::ProjPoint pippenger_msm(
     booth_encode_scalars(scalars, npoints, scalar_bytes, wbits,
                          num_windows, digits.data());
 
-    // Reusable bucket storage
-    std::vector<ProjPoint> buckets(nbuckets, curve.zero(ring));
+    // Reusable XYZZ bucket storage
+    using XYZZPt = typename Curve::XYZZPt;
+    std::vector<XYZZPt> buckets(nbuckets, curve.xyzz_zero(ring));
     std::vector<uint8_t> occupied(nbuckets, 0);
 
     ProjPoint result = curve.zero(ring);
@@ -211,8 +229,8 @@ typename Curve::ProjPoint pippenger_msm(
 
         // Check if window produced a non-trivial result
         bool has_points = false;
-        for (size_t j = 0; j < nbuckets && !has_points; j++) {
-            if (occupied[j]) has_points = true;
+        for (size_t j = 0; j < nbuckets; j++) {
+            if (occupied[j]) { has_points = true; break; }
         }
 
         if (has_points) {
@@ -267,11 +285,12 @@ typename Curve::ProjPoint pippenger_msm_parallel(
     booth_encode_scalars(scalars, npoints, scalar_bytes, wbits,
                          num_windows, digits.data());
 
-    // Pre-allocate per-thread bucket arrays (reused across windows)
-    std::vector<std::vector<ProjPoint>> all_buckets(num_threads);
+    // Pre-allocate per-thread XYZZ bucket arrays (reused across windows)
+    using XYZZPt = typename Curve::XYZZPt;
+    std::vector<std::vector<XYZZPt>> all_buckets(num_threads);
     std::vector<std::vector<uint8_t>> all_occupied(num_threads);
     for (size_t t = 0; t < num_threads; t++) {
-        all_buckets[t].resize(nbuckets, curve.zero(ring));
+        all_buckets[t].resize(nbuckets, curve.xyzz_zero(ring));
         all_occupied[t].resize(nbuckets, 0);
     }
 

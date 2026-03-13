@@ -47,7 +47,7 @@ HEADERS = bounds.hpp constexpr_utils.hpp bounded_element.hpp ring_element.hpp \
           elementwise_reduce.hpp change_base.hpp bounded_ring.hpp \
           fp12.hpp final_exponentiation.hpp miller.hpp fp2.hpp inversion.hpp \
           ec.hpp conversion_inversion.hpp scalar_mult.hpp \
-          batch_inversion.hpp batch_affine.hpp pippenger.hpp msm.hpp
+          batch_inversion.hpp batch_affine.hpp pippenger.hpp pippenger_v2.hpp msm.hpp
 
 # Google Benchmark library (adjust path as needed)
 BENCHMARK_LIBS = -lbenchmark -lpthread

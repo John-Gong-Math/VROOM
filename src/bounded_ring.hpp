@@ -119,6 +119,12 @@ class BoundedRing {
         return StandardElement{};
     }
 
+    // Fast zero check using native AVX512 VPTEST (or scalar fallback).
+    // Checks both RNS channels to avoid false positives.
+    static INLINE bool is_zero(const StandardElement &a) {
+        return a.m1.data.is_zero() && a.m2.data.is_zero();
+    }
+
     INLINE StandardElement one() const {
         return one_;
     }

@@ -56,6 +56,138 @@ class AffinePoint {
     }
 };
 
+// XYZZ coordinates: (X, Y, ZZ, ZZZ) where ZZ = Z², ZZZ = Z³.
+// Represents affine point (X/ZZ, Y/ZZZ). Identity when ZZ == 0 && ZZZ == 0.
+template<class RingElement>
+class XYZZPoint {
+    public:
+    RingElement X;
+    RingElement Y;
+    RingElement ZZ;
+    RingElement ZZZ;
+
+    XYZZPoint() = default;
+    XYZZPoint(const RingElement &x, const RingElement &y, const RingElement &zz, const RingElement &zzz)
+        : X(x), Y(y), ZZ(zz), ZZZ(zzz) {}
+};
+
+// XYZZ + Affine addition.
+// P = (X1, Y1, ZZ1, ZZZ1), Q = (x2, y2) affine.
+// 11 multiplications (including 1 identity for X3 normalization), 4 batch rounds.
+// No mul_3b needed (unlike projective Algorithm 7).
+template<class Ring>
+XYZZPoint<typename Ring::StandardElement> XYZZAddAffine(
+    const XYZZPoint<typename Ring::StandardElement> &P,
+    const AffinePoint<typename Ring::StandardElement> &Q,
+    const Ring &ring)
+{
+    // Round 1 (2M): U2 = x2*ZZ1, S2 = y2*ZZZ1
+    auto U2_wide = ring.prep_left(Q.x) * P.ZZ;
+    auto S2_wide = ring.prep_left(Q.y) * P.ZZZ;
+    auto [U2, S2] = ring.batch_reduce_expand(U2_wide, S2_wide);
+
+    auto H = U2 - P.X;
+    auto R = S2 - P.Y;
+
+    // Round 2 (2M): H², R²
+    auto H_p = ring.prep(H);
+    auto R_p = ring.prep(R);
+    auto HH_wide = H_p * H_p;
+    auto Rsq_wide = R_p * R_p;
+    auto [HH, Rsq] = ring.batch_reduce_expand(HH_wide, Rsq_wide);
+
+    // Round 3 (3M): H*HH, X1*HH, ZZ1*HH
+    auto HH_p = ring.prep(HH);
+    auto HHH_wide = H_p * HH_p;
+    auto V_wide = ring.prep_left(P.X) * HH_p;
+    auto ZZ3_wide = ring.prep_left(P.ZZ) * HH_p;
+    auto [HHH, V, ZZ3] = ring.batch_reduce_expand(HHH_wide, V_wide, ZZ3_wide);
+
+    // X3 = Rsq - HHH - 2V (non-standard bounds, normalized via identity mul)
+    auto X3_sub = Rsq - HHH - V - V;
+    auto V_minus_X3 = V - X3_sub;
+
+    // Round 4 (4M): X3 normalization, Y3 (accumulated), ZZZ3
+    auto one = ring.one();
+    auto X3_wide = ring.prep_left(X3_sub) * ring.prep(one);
+    auto HHH_p2 = ring.prep(HHH);
+    auto R_vmx_wide = ring.prep_left(R) * ring.prep(V_minus_X3);
+    auto Y1_negHHH_wide = ring.prep_left(P.Y) * ring.negate(HHH_p2);
+    auto Y3_wide = R_vmx_wide + Y1_negHHH_wide;
+    auto ZZZ3_wide = ring.prep_left(P.ZZZ) * HHH_p2;
+
+    auto [X3, Y3, ZZZ3] = ring.batch_reduce_expand(X3_wide, Y3_wide, ZZZ3_wide);
+    return XYZZPoint<typename Ring::StandardElement>(X3, Y3, ZZ3, ZZZ3);
+}
+
+// XYZZ + XYZZ addition for integration phase.
+// P = (X1,Y1,ZZ1,ZZZ1), Q = (X2,Y2,ZZ2,ZZZ2).
+// 15 multiplications (including 1 identity for X3), 4 batch rounds.
+template<class Ring>
+XYZZPoint<typename Ring::StandardElement> XYZZAdd(
+    const XYZZPoint<typename Ring::StandardElement> &P,
+    const XYZZPoint<typename Ring::StandardElement> &Q,
+    const Ring &ring)
+{
+    // Round 1 (6M): cross products
+    auto U1_wide = ring.prep_left(P.X) * Q.ZZ;
+    auto S1_wide = ring.prep_left(P.Y) * Q.ZZZ;
+    auto U2_wide = ring.prep_left(Q.X) * P.ZZ;
+    auto S2_wide = ring.prep_left(Q.Y) * P.ZZZ;
+    auto ZZcross_wide = ring.prep_left(P.ZZ) * Q.ZZ;
+    auto ZZZcross_wide = ring.prep_left(P.ZZZ) * Q.ZZZ;
+    auto [U1, S1, U2, S2, ZZcross, ZZZcross] = ring.batch_reduce_expand(
+        U1_wide, S1_wide, U2_wide, S2_wide, ZZcross_wide, ZZZcross_wide);
+
+    auto H = U2 - U1;
+    auto R = S2 - S1;
+
+    // Round 2 (2M): H², R²
+    auto H_p = ring.prep(H);
+    auto R_p = ring.prep(R);
+    auto HH_wide = H_p * H_p;
+    auto Rsq_wide = R_p * R_p;
+    auto [HH, Rsq] = ring.batch_reduce_expand(HH_wide, Rsq_wide);
+
+    // Round 3 (4M): H*HH, U1*HH, ZZcross*HH, ZZZcross*ZZZ deferred
+    auto HH_p = ring.prep(HH);
+    auto HHH_wide = H_p * HH_p;
+    auto V_wide = ring.prep_left(U1) * HH_p;
+    auto ZZ3_wide = ring.prep_left(ZZcross) * HH_p;
+    auto [HHH, V, ZZ3] = ring.batch_reduce_expand(HHH_wide, V_wide, ZZ3_wide);
+
+    // X3 = Rsq - HHH - 2V
+    auto X3_sub = Rsq - HHH - V - V;
+    auto V_minus_X3 = V - X3_sub;
+
+    // Round 4 (5M): X3 normalization, Y3 (accumulated), ZZZ3
+    auto one = ring.one();
+    auto X3_wide = ring.prep_left(X3_sub) * ring.prep(one);
+    auto HHH_p2 = ring.prep(HHH);
+    auto R_vmx_wide = ring.prep_left(R) * ring.prep(V_minus_X3);
+    auto S1_negHHH_wide = ring.prep_left(S1) * ring.negate(HHH_p2);
+    auto Y3_wide = R_vmx_wide + S1_negHHH_wide;
+    auto ZZZ3_wide = ring.prep_left(ZZZcross) * HHH_p2;
+
+    auto [X3, Y3, ZZZ3] = ring.batch_reduce_expand(X3_wide, Y3_wide, ZZZ3_wide);
+    return XYZZPoint<typename Ring::StandardElement>(X3, Y3, ZZ3, ZZZ3);
+}
+
+// Convert XYZZ → Projective.
+// (X, Y, ZZ, ZZZ) → (X*ZZZ, Y*ZZ, ZZ*ZZZ)
+// since affine = (X/ZZ, Y/ZZZ) and projective = (X_p/Z_p, Y_p/Z_p).
+template<class Ring>
+ProjectivePoint<typename Ring::StandardElement> XYZZToProj(
+    const XYZZPoint<typename Ring::StandardElement> &P,
+    const Ring &ring)
+{
+    auto Xp_wide = ring.prep_left(P.X) * P.ZZZ;
+    auto Yp_wide = ring.prep_left(P.Y) * P.ZZ;
+    auto Zp_wide = ring.prep_left(P.ZZ) * P.ZZZ;
+    auto [Xp, Yp, Zp] = ring.batch_reduce_expand(Xp_wide, Yp_wide, Zp_wide);
+    return ProjectivePoint<typename Ring::StandardElement>(Xp, Yp, Zp);
+}
+
 // ~5% faster, but doesn't work with new type system yet because it needs to preserve rns bounds across expansion.
 /*
 template<class Ring, class OffsetElement>
@@ -255,6 +387,7 @@ class G1 {
     public:
     using ProjPoint = ProjectivePoint<typename Ring::StandardElement>;
     using AffPoint = AffinePoint<typename Ring::StandardElement>;
+    using XYZZPt = XYZZPoint<typename Ring::StandardElement>;
 
     ProjPoint add_point(const ProjPoint &P, const ProjPoint &Q, const Ring &ring) const {
         return PointAdd<Ring>(P, Q, ring);
@@ -278,6 +411,27 @@ class G1 {
 
     INLINE ProjPoint zero(const Ring &ring) const {
         return ProjPoint(ring.zero(), ring.one(), ring.zero());
+    }
+
+    // XYZZ operations for Pippenger MSM
+    INLINE XYZZPt xyzz_from_affine(const AffPoint &P, const Ring &ring) const {
+        return XYZZPt(P.x, P.y, ring.one(), ring.one());
+    }
+
+    INLINE XYZZPt xyzz_zero(const Ring &ring) const {
+        return XYZZPt(ring.zero(), ring.one(), ring.zero(), ring.zero());
+    }
+
+    XYZZPt xyzz_add_affine(const XYZZPt &P, const AffPoint &Q, const Ring &ring) const {
+        return XYZZAddAffine<Ring>(P, Q, ring);
+    }
+
+    XYZZPt xyzz_add(const XYZZPt &P, const XYZZPt &Q, const Ring &ring) const {
+        return XYZZAdd<Ring>(P, Q, ring);
+    }
+
+    ProjPoint xyzz_to_proj(const XYZZPt &P, const Ring &ring) const {
+        return XYZZToProj<Ring>(P, ring);
     }
 
 };
