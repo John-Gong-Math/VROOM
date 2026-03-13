@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <thread>
 #include <atomic>
+#include <cstring>
 
 // Pippenger bucket method MSM for G1.
-// Uses unsigned digit decomposition (no Booth encoding) for V1 simplicity.
+// Uses Booth (signed digit) encoding to halve bucket count, improving cache
+// behavior during scatter. Prefetches future buckets to hide memory latency.
 //
 // NOT constant-time for bucket scatter (same as BLST).
 
@@ -37,15 +39,46 @@ inline uint32_t extract_bits(const uint8_t *scalar, size_t scalar_bytes,
     return val;
 }
 
-// Process a chunk of points for one window, scattering into the provided buckets.
+// Pre-encode all scalar digits using Booth (signed) encoding.
+// Outputs: digits[w * npoints + i] = signed digit for point i in window w.
+// An extra window is included (num_windows = ceil(scalar_bits/wbits) + 1) to
+// absorb any carry from the topmost real window.
+inline void booth_encode_scalars(
+    const uint8_t *const *scalars,
+    size_t npoints,
+    size_t scalar_bytes,
+    size_t wbits,
+    size_t num_windows,
+    int32_t *digits
+) {
+    uint32_t half = 1u << (wbits - 1);
+
+    for (size_t i = 0; i < npoints; i++) {
+        uint32_t carry = 0;
+        for (size_t w = 0; w < num_windows; w++) {
+            size_t bit_pos = w * wbits;
+            uint32_t raw = extract_bits(scalars[i], scalar_bytes, bit_pos, wbits) + carry;
+            if (raw > half) {
+                digits[w * npoints + i] = static_cast<int32_t>(raw) - static_cast<int32_t>(1u << wbits);
+                carry = 1;
+            } else {
+                digits[w * npoints + i] = static_cast<int32_t>(raw);
+                carry = 0;
+            }
+        }
+        // Carry should be 0 for valid scalars < 2^scalar_bits with the extra window.
+    }
+}
+
+// Scatter with Booth-encoded (signed) digits and prefetching.
+// digits points to the start of this window's digit array (size >= end).
 template<class Curve, class Ring>
 void scatter_chunk(
     const Curve &curve,
     const Ring &ring,
     const typename Curve::AffPoint *points,
-    const uint8_t *const *scalars,
+    const int32_t *digits,
     size_t start, size_t end,
-    size_t scalar_bytes, size_t bit_pos, size_t effective_wbits,
     typename Curve::ProjPoint *buckets,
     uint8_t *occupied,
     size_t /*nbuckets*/
@@ -53,13 +86,33 @@ void scatter_chunk(
     using ProjPoint = typename Curve::ProjPoint;
     using AffPoint = typename Curve::AffPoint;
 
+    static constexpr size_t PREFETCH_AHEAD = 4;
+
     for (size_t i = start; i < end; i++) {
-        uint32_t digit = extract_bits(scalars[i], scalar_bytes,
-                                       bit_pos, effective_wbits);
+        // Prefetch a future bucket to hide memory latency
+        if (i + PREFETCH_AHEAD < end) {
+            int32_t future_digit = digits[i + PREFETCH_AHEAD];
+            if (future_digit != 0) {
+                size_t future_bidx = static_cast<size_t>(
+                    future_digit < 0 ? -future_digit : future_digit) - 1;
+                __builtin_prefetch(&buckets[future_bidx], 1, 1);
+                __builtin_prefetch(
+                    reinterpret_cast<const char*>(&buckets[future_bidx]) + 64, 1, 1);
+                __builtin_prefetch(&occupied[future_bidx], 1, 1);
+            }
+        }
+
+        int32_t digit = digits[i];
         if (digit == 0) continue;
 
-        size_t bidx = digit - 1;
+        bool neg = digit < 0;
+        size_t bidx = static_cast<size_t>(neg ? -digit : digit) - 1;
+
         AffPoint pt = points[i];
+        if (neg) {
+            pt = curve.negate_affine(pt, ring);
+        }
+
         if (!occupied[bidx]) {
             buckets[bidx] = ProjPoint(pt.x, pt.y, ring.one());
             occupied[bidx] = 1;
@@ -107,7 +160,7 @@ typename Curve::ProjPoint integrate_buckets(
     return window_started ? window_sum : curve.zero(ring);
 }
 
-// Single-threaded Pippenger MSM.
+// Single-threaded Pippenger MSM with Booth encoding and prefetching.
 template<class Curve, class Ring>
 typename Curve::ProjPoint pippenger_msm(
     const Curve &curve,
@@ -122,8 +175,16 @@ typename Curve::ProjPoint pippenger_msm(
     if (npoints == 0) return curve.zero(ring);
 
     size_t wbits = choose_wbits(npoints);
-    size_t nbuckets = (1u << wbits) - 1;
+    size_t nbuckets = 1u << (wbits - 1);   // Halved by Booth encoding
     size_t scalar_bytes = (scalar_bits + 7) / 8;
+
+    // +1 extra window to absorb carry from Booth encoding of the top window
+    size_t num_windows = (scalar_bits + wbits - 1) / wbits + 1;
+
+    // Pre-encode all scalar digits
+    std::vector<int32_t> digits(num_windows * npoints);
+    booth_encode_scalars(scalars, npoints, scalar_bytes, wbits,
+                         num_windows, digits.data());
 
     // Reusable bucket storage
     std::vector<ProjPoint> buckets(nbuckets, curve.zero(ring));
@@ -131,25 +192,18 @@ typename Curve::ProjPoint pippenger_msm(
 
     ProjPoint result = curve.zero(ring);
     bool result_initialized = false;
-    size_t num_windows = (scalar_bits + wbits - 1) / wbits;
 
     for (size_t w = num_windows; w-- > 0; ) {
-        size_t bit_pos = w * wbits;
-
         if (result_initialized) {
             for (size_t d = 0; d < wbits; d++) {
                 result = curve.double_point(result, ring);
             }
         }
 
-        size_t effective_wbits = wbits;
-        if (bit_pos + wbits > scalar_bits) {
-            effective_wbits = scalar_bits - bit_pos;
-        }
-
         std::fill(occupied.begin(), occupied.end(), 0);
-        scatter_chunk(curve, ring, points, scalars, 0, npoints,
-                      scalar_bytes, bit_pos, effective_wbits,
+        scatter_chunk(curve, ring, points,
+                      digits.data() + w * npoints,
+                      0, npoints,
                       buckets.data(), occupied.data(), nbuckets);
 
         ProjPoint window_sum = integrate_buckets(curve, ring,
@@ -174,7 +228,7 @@ typename Curve::ProjPoint pippenger_msm(
     return result;
 }
 
-// Multi-threaded Pippenger MSM.
+// Multi-threaded Pippenger MSM with Booth encoding and prefetching.
 // Splits points across threads within each window. Each thread scatters into
 // its own bucket array. After scatter, partial buckets are merged and integrated.
 // Only beneficial for large npoints where scatter dominates.
@@ -202,11 +256,16 @@ typename Curve::ProjPoint pippenger_msm_parallel(
     if (npoints == 0) return curve.zero(ring);
 
     size_t wbits = choose_wbits(npoints);
-    size_t nbuckets = (1u << wbits) - 1;
+    size_t nbuckets = 1u << (wbits - 1);   // Halved by Booth encoding
     size_t scalar_bytes = (scalar_bits + 7) / 8;
-    size_t num_windows = (scalar_bits + wbits - 1) / wbits;
+    size_t num_windows = (scalar_bits + wbits - 1) / wbits + 1;
 
     if (num_threads > npoints / 64) num_threads = std::max(npoints / 64, (size_t)1);
+
+    // Pre-encode all scalar digits (shared read-only across threads)
+    std::vector<int32_t> digits(num_windows * npoints);
+    booth_encode_scalars(scalars, npoints, scalar_bytes, wbits,
+                         num_windows, digits.data());
 
     // Pre-allocate per-thread bucket arrays (reused across windows)
     std::vector<std::vector<ProjPoint>> all_buckets(num_threads);
@@ -229,18 +288,13 @@ typename Curve::ProjPoint pippenger_msm_parallel(
     bool result_initialized = false;
 
     for (size_t w = num_windows; w-- > 0; ) {
-        size_t bit_pos = w * wbits;
-
         if (result_initialized) {
             for (size_t d = 0; d < wbits; d++) {
                 result = curve.double_point(result, ring);
             }
         }
 
-        size_t effective_wbits = wbits;
-        if (bit_pos + wbits > scalar_bits) {
-            effective_wbits = scalar_bits - bit_pos;
-        }
+        const int32_t *window_digits = digits.data() + w * npoints;
 
         // Launch worker threads for scatter (threads 1..num_threads-1)
         std::vector<std::thread> threads;
@@ -250,10 +304,10 @@ typename Curve::ProjPoint pippenger_msm_parallel(
             // Clear this thread's occupied flags
             std::fill(all_occupied[t].begin(), all_occupied[t].end(), 0);
 
-            threads.emplace_back([&, t, bit_pos, effective_wbits]() {
-                scatter_chunk(curve, ring, points, scalars,
+            threads.emplace_back([&, t, window_digits]() {
+                scatter_chunk(curve, ring, points,
+                              window_digits,
                               starts[t], ends[t],
-                              scalar_bytes, bit_pos, effective_wbits,
                               all_buckets[t].data(), all_occupied[t].data(),
                               nbuckets);
             });
@@ -261,9 +315,9 @@ typename Curve::ProjPoint pippenger_msm_parallel(
 
         // Main thread does chunk 0
         std::fill(all_occupied[0].begin(), all_occupied[0].end(), 0);
-        scatter_chunk(curve, ring, points, scalars,
+        scatter_chunk(curve, ring, points,
+                      window_digits,
                       starts[0], ends[0],
-                      scalar_bytes, bit_pos, effective_wbits,
                       all_buckets[0].data(), all_occupied[0].data(),
                       nbuckets);
 

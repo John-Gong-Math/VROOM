@@ -272,6 +272,10 @@ class G1 {
         return ProjPoint(P.x, ring.standard_negate(P.y), P.z);
     }
 
+    INLINE AffPoint negate_affine(const AffPoint &P, const Ring &ring) const {
+        return AffPoint(P.x, ring.standard_negate(P.y));
+    }
+
     INLINE ProjPoint zero(const Ring &ring) const {
         return ProjPoint(ring.zero(), ring.one(), ring.zero());
     }
