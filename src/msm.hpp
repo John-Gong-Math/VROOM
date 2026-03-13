@@ -1,12 +1,11 @@
 #pragma once
-#include "pippenger.hpp"
+#include "pippenger_v2.hpp"
 #include "scalar_mult.hpp"
 #include <vector>
 
 // Public MSM API with dispatch.
-// Selects the best algorithm based on the number of points.
-//
-// G1 only for V1. G2 Pippenger deferred to V2 (needs Fp2 batch inversion).
+// Uses batch affine Pippenger (v2) for large point counts,
+// windowed scalar mult for small counts.
 
 // Single-threaded MSM.
 template<class Curve, class Ring>
@@ -49,12 +48,11 @@ typename Curve::ProjPoint msm(
         return result;
     }
 
-    // Large count: Pippenger
-    return pippenger_msm(curve, ring, points, scalars, npoints, scalar_bits);
+    // Large count: batch affine Pippenger (v2)
+    return msm_v2(ring, points, scalars, npoints, scalar_bits);
 }
 
 // Multi-threaded MSM.
-// Uses parallel point scatter within Pippenger windows.
 // num_threads=0 means auto-detect via hardware_concurrency().
 template<class Curve, class Ring>
 typename Curve::ProjPoint msm_parallel(
@@ -69,6 +67,6 @@ typename Curve::ProjPoint msm_parallel(
     if (npoints < 32) {
         return msm(curve, ring, points, scalars, npoints, scalar_bits);
     }
-    return pippenger_msm_parallel(curve, ring, points, scalars, npoints,
-                                   scalar_bits, num_threads);
+    return msm_v2_parallel(ring, points, scalars, npoints,
+                            scalar_bits, num_threads);
 }

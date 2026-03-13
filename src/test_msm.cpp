@@ -8,6 +8,7 @@ extern "C" {
 #include "../blst/ec_mult.h"
 }
 #include "msm.hpp"
+#include "pippenger.hpp"
 #include "pippenger_v2.hpp"
 #include "batch_inversion.hpp"
 #include "batch_affine.hpp"
