@@ -9,7 +9,12 @@
       "Bash(tar czf:*)",
       "Bash(gcloud compute instances list:*)",
       "Bash(gcloud compute scp:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(gcloud compute:*)",
+      "Bash(cd /Users/zhiyonggong/Documents/codes/c++/VROOM/blst && make 2>&1 | tail -5)",
+      "Bash(CC=gcc make 2>&1 | tail -10)",
+      "Bash(CC=gcc make 2>&1)",
+      "Bash(scp src/pippenger.hpp src/msm.hpp msm-bench-large:~/VROOM/src/)"
     ]
   }
 }
