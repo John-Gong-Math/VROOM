@@ -246,10 +246,11 @@ typename Curve::ProjPoint pippenger_msm(
     return result;
 }
 
-// Multi-threaded Pippenger MSM with Booth encoding and prefetching.
-// Splits points across threads within each window. Each thread scatters into
-// its own bucket array. After scatter, partial buckets are merged and integrated.
-// Only beneficial for large npoints where scatter dominates.
+// Multi-threaded Pippenger MSM with per-window parallelism.
+// Each thread processes complete windows (scatter all points + integrate),
+// with zero inter-thread synchronization during compute. An atomic counter
+// provides dynamic load balancing — fast-finishing threads grab the next window.
+// Final Horner reduction is sequential (~255 doublings).
 template<class Curve, class Ring>
 typename Curve::ProjPoint pippenger_msm_parallel(
     const Curve &curve,
@@ -261,6 +262,7 @@ typename Curve::ProjPoint pippenger_msm_parallel(
     size_t num_threads = 0
 ) {
     using ProjPoint = typename Curve::ProjPoint;
+    using XYZZPt = typename Curve::XYZZPt;
 
     if (num_threads == 0) {
         num_threads = std::thread::hardware_concurrency();
@@ -278,31 +280,66 @@ typename Curve::ProjPoint pippenger_msm_parallel(
     size_t scalar_bytes = (scalar_bits + 7) / 8;
     size_t num_windows = (scalar_bits + wbits - 1) / wbits + 1;
 
-    if (num_threads > npoints / 64) num_threads = std::max(npoints / 64, (size_t)1);
+    // Cap threads at number of windows — no point having more
+    if (num_threads > num_windows) num_threads = num_windows;
 
     // Pre-encode all scalar digits (shared read-only across threads)
     std::vector<int32_t> digits(num_windows * npoints);
     booth_encode_scalars(scalars, npoints, scalar_bytes, wbits,
                          num_windows, digits.data());
 
-    // Pre-allocate per-thread XYZZ bucket arrays (reused across windows)
-    using XYZZPt = typename Curve::XYZZPt;
-    std::vector<std::vector<XYZZPt>> all_buckets(num_threads);
-    std::vector<std::vector<uint8_t>> all_occupied(num_threads);
-    for (size_t t = 0; t < num_threads; t++) {
-        all_buckets[t].resize(nbuckets, curve.xyzz_zero(ring));
-        all_occupied[t].resize(nbuckets, 0);
+    // Per-window results (written by exactly one thread each)
+    std::vector<ProjPoint> window_results(num_windows, curve.zero(ring));
+    std::vector<uint8_t> window_has_result(num_windows, 0);
+
+    // Atomic work counter for dynamic load balancing
+    std::atomic<size_t> next_window{0};
+
+    // Worker function: each thread processes complete windows
+    auto worker = [&]() {
+        // Thread-local bucket storage — reused across windows for cache warmth
+        std::vector<XYZZPt> buckets(nbuckets, curve.xyzz_zero(ring));
+        std::vector<uint8_t> occupied(nbuckets, 0);
+
+        while (true) {
+            size_t w = next_window.fetch_add(1, std::memory_order_relaxed);
+            if (w >= num_windows) break;
+
+            // Clear occupied flags for this window
+            std::fill(occupied.begin(), occupied.end(), 0);
+
+            // Scatter all points into buckets for this window
+            scatter_chunk(curve, ring, points,
+                          digits.data() + w * npoints,
+                          0, npoints,
+                          buckets.data(), occupied.data(), nbuckets);
+
+            // Integrate buckets into window result
+            window_results[w] = integrate_buckets(curve, ring,
+                buckets.data(), occupied.data(), nbuckets);
+
+            // Check if window produced a non-trivial result
+            bool has_points = false;
+            for (size_t j = 0; j < nbuckets; j++) {
+                if (occupied[j]) { has_points = true; break; }
+            }
+            window_has_result[w] = has_points ? 1 : 0;
+        }
+    };
+
+    // Spawn num_threads-1 workers, main thread runs worker() too
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads - 1);
+    for (size_t t = 1; t < num_threads; t++) {
+        threads.emplace_back(worker);
+    }
+    worker();  // Main thread participates
+
+    for (auto &th : threads) {
+        th.join();
     }
 
-    // Compute chunk boundaries
-    size_t chunk = npoints / num_threads;
-    size_t remainder = npoints % num_threads;
-    std::vector<size_t> starts(num_threads), ends(num_threads);
-    for (size_t t = 0; t < num_threads; t++) {
-        starts[t] = t * chunk + std::min(t, remainder);
-        ends[t] = starts[t] + chunk + (t < remainder ? 1 : 0);
-    }
-
+    // Sequential Horner reduction: accumulate window results from high to low
     ProjPoint result = curve.zero(ring);
     bool result_initialized = false;
 
@@ -313,74 +350,12 @@ typename Curve::ProjPoint pippenger_msm_parallel(
             }
         }
 
-        const int32_t *window_digits = digits.data() + w * npoints;
-
-        // Launch worker threads for scatter (threads 1..num_threads-1)
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads - 1);
-
-        for (size_t t = 1; t < num_threads; t++) {
-            // Clear this thread's occupied flags
-            std::fill(all_occupied[t].begin(), all_occupied[t].end(), 0);
-
-            threads.emplace_back([&, t, window_digits]() {
-                scatter_chunk(curve, ring, points,
-                              window_digits,
-                              starts[t], ends[t],
-                              all_buckets[t].data(), all_occupied[t].data(),
-                              nbuckets);
-            });
-        }
-
-        // Main thread does chunk 0
-        std::fill(all_occupied[0].begin(), all_occupied[0].end(), 0);
-        scatter_chunk(curve, ring, points,
-                      window_digits,
-                      starts[0], ends[0],
-                      all_buckets[0].data(), all_occupied[0].data(),
-                      nbuckets);
-
-        // Wait for all workers
-        for (auto &th : threads) {
-            th.join();
-        }
-
-        // Integrate each thread's buckets independently, then combine per-thread
-        // window sums. This avoids a large number of extra projective bucket
-        // merges and keeps the aggregation path closer to the single-thread flow.
-        ProjPoint window_sum_total = curve.zero(ring);
-        bool window_initialized = false;
-
-        for (size_t t = 0; t < num_threads; t++) {
-            bool has_points = false;
-            for (size_t j = 0; j < nbuckets && !has_points; j++) {
-                if (all_occupied[t][j]) has_points = true;
-            }
-
-            if (!has_points) continue;
-
-            ProjPoint thread_window_sum = integrate_buckets(
-                curve,
-                ring,
-                all_buckets[t].data(),
-                all_occupied[t].data(),
-                nbuckets
-            );
-
-            if (!window_initialized) {
-                window_sum_total = thread_window_sum;
-                window_initialized = true;
-            } else {
-                window_sum_total = curve.add_point(window_sum_total, thread_window_sum, ring);
-            }
-        }
-
-        if (window_initialized) {
+        if (window_has_result[w]) {
             if (!result_initialized) {
-                result = window_sum_total;
+                result = window_results[w];
                 result_initialized = true;
             } else {
-                result = curve.add_point(result, window_sum_total, ring);
+                result = curve.add_point(result, window_results[w], ring);
             }
         }
     }

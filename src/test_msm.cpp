@@ -1309,6 +1309,80 @@ int test_pippenger_v2_parallel(const RingType &ring, const BigInt &q) {
     return failed;
 }
 
+// ========================================================================
+// Test: Pippenger V1 parallel (per-window) vs single-threaded
+// ========================================================================
+template<class RingType>
+int test_pippenger_v1_parallel(const RingType &ring, const BigInt &q) {
+    std::cout << "=== Test: Pippenger V1 Parallel vs Single-threaded ===" << std::endl;
+    int passed = 0, failed = 0;
+
+    using CurveType = G1<RingType>;
+    using AffPoint = typename CurveType::AffPoint;
+    CurveType g1_curve;
+
+    BigInt r(bls12_381_scalar_modulus_hex_msm, 16);
+
+    std::vector<size_t> test_sizes = {256, 1024, 4096, 65536};
+    std::vector<size_t> thread_counts = {2, 4};
+    {
+        size_t hw = std::thread::hardware_concurrency();
+        if (hw > 0 && hw != 2 && hw != 4) {
+            thread_counts.push_back(hw);
+        }
+    }
+
+    for (size_t npoints : test_sizes) {
+        std::vector<AffPoint> points(npoints);
+        std::vector<std::vector<uint8_t>> scalar_data(npoints);
+        std::vector<const uint8_t*> scalar_ptrs(npoints);
+
+        for (size_t i = 0; i < npoints; i++) {
+            BigInt pt_scalar = deterministic_scalar_msm(2 * i, r);
+            byte pt_scalar_bytes[32] = {0};
+            bigint_to_bytes_le_msm(pt_scalar_bytes, pt_scalar, 32);
+            POINTonE1 blst_proj;
+            blst_p1_mult(&blst_proj, &BLS12_381_G1, pt_scalar_bytes, 256);
+            POINTonE1_affine blst_aff;
+            blst_p1_to_affine(&blst_aff, &blst_proj);
+            points[i] = blst_g1_to_affine_point_msm(blst_aff, ring);
+
+            BigInt s = deterministic_scalar_msm(2 * i + 1, r);
+            scalar_data[i].resize(32, 0);
+            bigint_to_bytes_le_msm(scalar_data[i].data(), s, 32);
+            scalar_ptrs[i] = scalar_data[i].data();
+        }
+
+        // Single-threaded reference
+        auto st_result = pippenger_msm(g1_curve, ring, points.data(),
+                                        scalar_ptrs.data(), npoints, 255);
+        auto [st_x, st_y] = proj_to_affine_bigint(st_result, ring, q);
+
+        for (size_t nt : thread_counts) {
+            std::cout << "  n=" << npoints << " threads=" << nt << ": ";
+
+            auto mt_result = pippenger_msm_parallel(g1_curve, ring, points.data(),
+                                                     scalar_ptrs.data(), npoints, 255, nt);
+            auto [mt_x, mt_y] = proj_to_affine_bigint(mt_result, ring, q);
+
+            if (st_x == mt_x && st_y == mt_y) {
+                passed++;
+                std::cout << "PASS" << std::endl;
+            } else {
+                failed++;
+                std::cout << "FAIL" << std::endl;
+                std::cout << "    ST: (" << st_x.to_string(16) << ")" << std::endl;
+                std::cout << "    MT: (" << mt_x.to_string(16) << ")" << std::endl;
+            }
+        }
+    }
+
+    std::cout << "  Passed: " << passed << ", Failed: " << failed << std::endl;
+    if (failed == 0) std::cout << "  All Pippenger V1 Parallel tests passed!" << std::endl;
+    std::cout << std::endl;
+    return failed;
+}
+
 int main() {
     try {
         BigInt q(bls12_381_modulus_hex_msm, 16);
@@ -1328,6 +1402,7 @@ int main() {
         total_failures += test_msm_vs_blst(ring, q);
         total_failures += test_pippenger_v2_vs_naive(ring, q);
         total_failures += test_pippenger_v2_parallel(ring, q);
+        total_failures += test_pippenger_v1_parallel(ring, q);
         total_failures += test_edge_cases(ring, q);
 
         std::cout << "================================================" << std::endl;

@@ -9,6 +9,7 @@ extern "C" {
 #include "../blst/ec_mult.h"
 }
 #include "msm.hpp"
+#include "pippenger.hpp"
 #include "pippenger_v2.hpp"
 #include "bounded_ring.hpp"
 #include "conversion_inversion.hpp"
@@ -200,11 +201,49 @@ static void BM_VROOM_MSM_V2_Parallel(benchmark::State& state) {
     }
 }
 
+// ---- VROOM V1 Pippenger (serial) Benchmark ----
+
+static void BM_VROOM_V1_Pippenger(benchmark::State& state) {
+    size_t npoints = static_cast<size_t>(state.range(0));
+    BigInt q(bench_bls12_381_modulus_hex, 16);
+    RingType ring(q);
+    G1<RingType> g1_curve;
+
+    auto data = generate_test_data(ring, npoints);
+    benchmark::DoNotOptimize(data);
+
+    for (auto _ : state) {
+        auto result = pippenger_msm(g1_curve, ring, data.vroom_points.data(),
+                                     data.scalar_ptrs.data(), npoints, 255);
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+// ---- VROOM V1 Pippenger Parallel Benchmark ----
+
+static void BM_VROOM_V1_Pippenger_Parallel(benchmark::State& state) {
+    size_t npoints = static_cast<size_t>(state.range(0));
+    BigInt q(bench_bls12_381_modulus_hex, 16);
+    RingType ring(q);
+    G1<RingType> g1_curve;
+
+    auto data = generate_test_data(ring, npoints);
+    benchmark::DoNotOptimize(data);
+
+    for (auto _ : state) {
+        auto result = pippenger_msm_parallel(g1_curve, ring, data.vroom_points.data(),
+                                              data.scalar_ptrs.data(), npoints, 255, 0);
+        benchmark::DoNotOptimize(result);
+    }
+}
+
 // Register benchmarks for 2^20 points
 BENCHMARK(BM_VROOM_MSM)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_VROOM_MSM_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_BLST_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_VROOM_MSM_V2)->Arg(1048576)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_VROOM_MSM_V2_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_V1_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_V1_Pippenger_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_MAIN();
