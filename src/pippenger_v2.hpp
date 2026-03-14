@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <thread>
+#include <atomic>
 #include <algorithm>
 
 // ============================================================
@@ -492,10 +493,11 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2(
     return result;
 }
 
-// Multi-threaded: parallel across points within each window.
-// Each thread has its own AffineSchedule; per-thread window sums
-// are combined via PointAdd. Uses Horner evaluation (high-to-low)
-// to avoid the expensive per-window shifting of the old approach.
+// Multi-threaded: per-window work-stealing with batch affine arithmetic.
+// Each thread owns a thread-local AffineSchedule, reused across windows
+// for cache warmth. A single atomic counter provides zero-synchronization
+// dynamic load balancing. Sequential Horner reduction after all windows
+// are processed.
 template<class Ring>
 ProjectivePoint<typename Ring::StandardElement> msm_v2_parallel(
     const Ring &ring,
@@ -525,53 +527,36 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2_parallel(
     size_t scalar_bytes = (scalar_bits + 7) / 8;
     size_t num_windows  = (scalar_bits + wbits - 1) / wbits + 1;
 
-    // Cap threads to avoid tiny chunks
-    size_t actual_threads = num_threads;
-    if (actual_threads > npoints / 64)
-        actual_threads = std::max(npoints / 64, (size_t)1);
+    // Cap threads at number of windows — no point having more
+    if (num_threads > num_windows) num_threads = num_windows;
 
     std::vector<int32_t> digits(num_windows * npoints);
     msm_booth_encode(scalars, npoints, scalar_bytes, wbits,
                       num_windows, digits.data());
 
-    // Pre-allocate per-thread AffineSchedules
-    std::vector<AffineSchedule<Ring>> schedules;
-    schedules.reserve(actual_threads);
-    for (size_t t = 0; t < actual_threads; t++)
-        schedules.emplace_back(ring, nbuckets, nbuckets);
+    // Per-window results (written by exactly one thread each)
+    std::vector<ProjPt>  window_results(num_windows, identity);
+    std::vector<uint8_t> window_has_result(num_windows, 0);
 
-    // Compute chunk boundaries for point splitting
-    size_t chunk = npoints / actual_threads;
-    size_t remainder = npoints % actual_threads;
-    std::vector<size_t> starts(actual_threads), ends(actual_threads);
-    for (size_t t = 0; t < actual_threads; t++) {
-        starts[t] = t * chunk + std::min(t, remainder);
-        ends[t] = starts[t] + chunk + (t < remainder ? 1 : 0);
-    }
+    // Atomic work counter for dynamic load balancing
+    std::atomic<size_t> next_window{0};
 
-    ProjPt result = identity;
-    bool result_init = false;
+    // Worker function: each thread processes complete windows
+    auto worker = [&]() {
+        // Thread-local AffineSchedule — reused across windows for cache warmth
+        AffineSchedule<Ring> sched(ring, nbuckets, nbuckets);
 
-    for (size_t w = num_windows; w-- > 0; ) {
-        // Horner shift (no expensive per-window shifting like the old approach)
-        if (result_init) {
-            for (size_t d = 0; d < wbits; d++)
-                result = PointDouble(result, ring);
-        }
+        while (true) {
+            size_t w = next_window.fetch_add(1, std::memory_order_relaxed);
+            if (w >= num_windows) break;
 
-        const int32_t *wd = digits.data() + w * npoints;
-
-        // Parallel scatter: each thread processes its chunk of points
-        auto worker = [&](size_t tid) {
-            auto &sched = schedules[tid];
             sched.reset();
-            size_t start = starts[tid];
-            size_t end = ends[tid];
+            const int32_t *wd = digits.data() + w * npoints;
 
-            for (size_t i = start; i < end; i++) {
-                // Prefetch future bucket
+            // Scatter ALL npoints for this window (with prefetch)
+            for (size_t i = 0; i < npoints; i++) {
                 static constexpr size_t PREFETCH_AHEAD = 4;
-                if (i + PREFETCH_AHEAD < end) {
+                if (i + PREFETCH_AHEAD < npoints) {
                     int32_t fd = wd[i + PREFETCH_AHEAD];
                     if (fd != 0) {
                         size_t fb = static_cast<size_t>(fd < 0 ? -fd : fd) - 1;
@@ -592,47 +577,54 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2_parallel(
                     sched.add(points, i, bidx, neg);
                 }
             }
+
             sched.execute(points);
-        };
 
-        std::vector<std::thread> threads;
-        threads.reserve(actual_threads - 1);
-        for (size_t t = 1; t < actual_threads; t++)
-            threads.emplace_back(worker, t);
-        worker(0);
-        for (auto &th : threads) th.join();
-
-        // Combine per-thread window sums
-        ProjPt window_sum = identity;
-        bool window_init = false;
-
-        for (size_t t = 0; t < actual_threads; t++) {
-            auto &sched = schedules[t];
-            bool has_points = false;
-            for (size_t j = 0; j < nbuckets && !has_points; j++)
-                if (sched.occupied[j] || sched.proj_occupied[j]) has_points = true;
-
-            if (!has_points) continue;
-
-            ProjPt thread_sum = integrate_buckets_v2(ring,
+            // Integrate buckets into window result
+            window_results[w] = integrate_buckets_v2(
+                ring,
                 sched.buckets.data(), sched.occupied.data(),
                 sched.proj_buckets.data(), sched.proj_occupied.data(),
                 nbuckets);
 
-            if (!window_init) {
-                window_sum = thread_sum;
-                window_init = true;
-            } else {
-                window_sum = PointAdd(window_sum, thread_sum, ring);
+            // Check if window produced a non-trivial result
+            bool has_points = false;
+            for (size_t j = 0; j < nbuckets; j++) {
+                if (sched.occupied[j] || sched.proj_occupied[j]) {
+                    has_points = true;
+                    break;
+                }
             }
+            window_has_result[w] = has_points ? 1 : 0;
+        }
+    };
+
+    // Spawn num_threads-1 workers, main thread runs worker() too
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads - 1);
+    for (size_t t = 1; t < num_threads; t++)
+        threads.emplace_back(worker);
+    worker();  // Main thread participates
+
+    for (auto &th : threads)
+        th.join();
+
+    // Sequential Horner reduction: accumulate window results from high to low
+    ProjPt result = identity;
+    bool result_init = false;
+
+    for (size_t w = num_windows; w-- > 0; ) {
+        if (result_init) {
+            for (size_t d = 0; d < wbits; d++)
+                result = PointDouble(result, ring);
         }
 
-        if (window_init) {
+        if (window_has_result[w]) {
             if (!result_init) {
-                result      = window_sum;
+                result      = window_results[w];
                 result_init = true;
             } else {
-                result = PointAdd(result, window_sum, ring);
+                result = PointAdd(result, window_results[w], ring);
             }
         }
     }
