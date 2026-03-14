@@ -150,6 +150,9 @@ class AffineSchedule {
     size_t capacity;
     size_t count;
     size_t nbuckets_;
+    uint32_t window_epoch;
+    size_t active_affine;
+    size_t active_proj;
 
     // Per-slot metadata
     std::vector<size_t>  slot_bucket;
@@ -167,14 +170,15 @@ class AffineSchedule {
 public:
     // Affine buckets: primary accumulation target
     std::vector<AffPt>   buckets;
-    std::vector<uint8_t> occupied;
+    std::vector<uint32_t> occupied;
 
     // Projective conflict accumulators: rare fallback
     std::vector<ProjPt>  proj_buckets;
-    std::vector<uint8_t> proj_occupied;
+    std::vector<uint32_t> proj_occupied;
 
     AffineSchedule(const Ring &r, size_t nb, size_t cap)
         : ring(r), capacity(cap), count(0), nbuckets_(nb)
+        , window_epoch(1), active_affine(0), active_proj(0)
         , slot_bucket(cap), slot_base(cap), slot_neg(cap)
         , in_sched(nb, 0)
         , buckets(nb), occupied(nb, 0)
@@ -199,9 +203,10 @@ public:
         AffPt pt = bases[base_idx];
         if (neg) pt = negate_affine(pt, ring);
 
-        if (!proj_occupied[bidx]) {
+        if (!is_proj_occupied(bidx)) {
             proj_buckets[bidx]  = ProjPt(pt.x, pt.y, ring.one());
-            proj_occupied[bidx] = 1;
+            proj_occupied[bidx] = window_epoch;
+            active_proj++;
         } else {
             proj_buckets[bidx] = PointMixedAdd(proj_buckets[bidx], pt, ring);
         }
@@ -215,12 +220,34 @@ public:
     // Reset for a new window.
     void reset() {
         count = 0;
-        std::fill(in_sched.begin(), in_sched.end(), 0);
-        std::fill(occupied.begin(), occupied.end(), 0);
-        std::fill(proj_occupied.begin(), proj_occupied.end(), 0);
+        active_affine = 0;
+        active_proj = 0;
+        window_epoch++;
+        if (window_epoch == 0) {
+            // Rare wraparound guard for long-running fuzz/bench loops.
+            std::fill(occupied.begin(), occupied.end(), 0);
+            std::fill(proj_occupied.begin(), proj_occupied.end(), 0);
+            window_epoch = 1;
+        }
+    }
+
+    bool has_points() const {
+        return (active_affine + active_proj) > 0;
+    }
+
+    uint32_t epoch() const {
+        return window_epoch;
     }
 
 private:
+    bool is_affine_occupied(size_t bidx) const {
+        return occupied[bidx] == window_epoch;
+    }
+
+    bool is_proj_occupied(size_t bidx) const {
+        return proj_occupied[bidx] == window_epoch;
+    }
+
     AffPt resolve(const AffPt *bases, size_t slot) const {
         AffPt pt = bases[slot_base[slot]];
         if (slot_neg[slot]) pt = negate_affine(pt, ring);
@@ -234,9 +261,10 @@ private:
         // Non-empty buckets are queued for batch affine addition.
         for (size_t s = 0; s < count; s++) {
             size_t bidx = slot_bucket[s];
-            if (!occupied[bidx]) {
+            if (!is_affine_occupied(bidx)) {
                 buckets[bidx]  = resolve(bases, s);
-                occupied[bidx] = 1;
+                occupied[bidx] = window_epoch;
+                active_affine++;
             } else {
                 add_slots.push_back(s);
             }
@@ -281,7 +309,10 @@ private:
                     auto dy = field_sub(ring, pt.y, buckets[bidx].y);
                     if (Ring::is_zero(dy)) {
                         // P + (-P) = O. Mark bucket empty.
-                        occupied[bidx] = 0;
+                        if (is_affine_occupied(bidx)) {
+                            occupied[bidx] = 0;
+                            active_affine--;
+                        }
                     } else {
                         // P == Q -> doubling. Use projective formula, convert back.
                         ProjPt proj(buckets[bidx].x, buckets[bidx].y, ring.one());
@@ -344,10 +375,11 @@ template<class Ring>
 ProjectivePoint<typename Ring::StandardElement> integrate_buckets_v2(
     const Ring &ring,
     const AffinePoint<typename Ring::StandardElement>  *aff_buckets,
-    const uint8_t                                      *aff_occupied,
+    const uint32_t                                     *aff_occupied,
     const ProjectivePoint<typename Ring::StandardElement> *proj_buckets,
-    const uint8_t                                        *proj_occupied,
-    size_t nbuckets)
+    const uint32_t                                       *proj_occupied,
+    size_t nbuckets,
+    uint32_t active_epoch)
 {
     using StdElem  = typename Ring::StandardElement;
     using ProjPt   = ProjectivePoint<StdElem>;
@@ -359,8 +391,8 @@ ProjectivePoint<typename Ring::StandardElement> integrate_buckets_v2(
     bool window_started  = false;
 
     for (size_t j = nbuckets; j-- > 0; ) {
-        bool has_a = aff_occupied[j];
-        bool has_p = proj_occupied[j];
+        bool has_a = (aff_occupied[j] == active_epoch);
+        bool has_p = (proj_occupied[j] == active_epoch);
 
         if (has_a || has_p) {
             if (!running_started) {
@@ -474,13 +506,10 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2(
             ring,
             sched.buckets.data(), sched.occupied.data(),
             sched.proj_buckets.data(), sched.proj_occupied.data(),
-            nbuckets);
+            nbuckets,
+            sched.epoch());
 
-        bool has_points = false;
-        for (size_t j = 0; j < nbuckets && !has_points; j++)
-            if (sched.occupied[j] || sched.proj_occupied[j]) has_points = true;
-
-        if (has_points) {
+        if (sched.has_points()) {
             if (!result_init) {
                 result      = window_sum;
                 result_init = true;
@@ -585,17 +614,10 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2_parallel(
                 ring,
                 sched.buckets.data(), sched.occupied.data(),
                 sched.proj_buckets.data(), sched.proj_occupied.data(),
-                nbuckets);
+                nbuckets,
+                sched.epoch());
 
-            // Check if window produced a non-trivial result
-            bool has_points = false;
-            for (size_t j = 0; j < nbuckets; j++) {
-                if (sched.occupied[j] || sched.proj_occupied[j]) {
-                    has_points = true;
-                    break;
-                }
-            }
-            window_has_result[w] = has_points ? 1 : 0;
+            window_has_result[w] = sched.has_points() ? 1 : 0;
         }
     };
 

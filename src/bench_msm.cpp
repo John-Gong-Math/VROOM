@@ -70,6 +70,17 @@ struct MSMTestData {
     std::vector<const uint8_t*> scalar_ptrs;
 };
 
+static size_t points_from_exp2_arg(const benchmark::State& state) {
+    const size_t exp = static_cast<size_t>(state.range(0));
+    return size_t(1) << exp;
+}
+
+static void apply_pow2_exponents(benchmark::Benchmark* b) {
+    for (int exp = 8; exp <= 20; exp += 2) {
+        b->Arg(exp);
+    }
+}
+
 static MSMTestData generate_test_data(const RingType &ring, size_t npoints) {
     MSMTestData data;
     BigInt r(bench_bls12_381_scalar_hex, 16);
@@ -109,7 +120,7 @@ static MSMTestData generate_test_data(const RingType &ring, size_t npoints) {
 // ---- VROOM MSM Benchmark ----
 
 static void BM_VROOM_MSM(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
     G1<RingType> g1_curve;
@@ -127,7 +138,7 @@ static void BM_VROOM_MSM(benchmark::State& state) {
 // ---- VROOM Parallel MSM Benchmark ----
 
 static void BM_VROOM_MSM_Parallel(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
     G1<RingType> g1_curve;
@@ -145,7 +156,7 @@ static void BM_VROOM_MSM_Parallel(benchmark::State& state) {
 // ---- BLST Pippenger MSM Benchmark ----
 
 static void BM_BLST_Pippenger(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
 
@@ -170,7 +181,7 @@ static void BM_BLST_Pippenger(benchmark::State& state) {
 // ---- VROOM MSM v2 (batch affine) Benchmark ----
 
 static void BM_VROOM_MSM_V2(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
 
@@ -187,7 +198,7 @@ static void BM_VROOM_MSM_V2(benchmark::State& state) {
 // ---- VROOM MSM v2 Parallel (batch affine) Benchmark ----
 
 static void BM_VROOM_MSM_V2_Parallel(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
 
@@ -204,7 +215,7 @@ static void BM_VROOM_MSM_V2_Parallel(benchmark::State& state) {
 // ---- VROOM V1 Pippenger (serial) Benchmark ----
 
 static void BM_VROOM_V1_Pippenger(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
     G1<RingType> g1_curve;
@@ -222,7 +233,7 @@ static void BM_VROOM_V1_Pippenger(benchmark::State& state) {
 // ---- VROOM V1 Pippenger Parallel Benchmark ----
 
 static void BM_VROOM_V1_Pippenger_Parallel(benchmark::State& state) {
-    size_t npoints = static_cast<size_t>(state.range(0));
+    size_t npoints = points_from_exp2_arg(state);
     BigInt q(bench_bls12_381_modulus_hex, 16);
     RingType ring(q);
     G1<RingType> g1_curve;
@@ -237,13 +248,27 @@ static void BM_VROOM_V1_Pippenger_Parallel(benchmark::State& state) {
     }
 }
 
-// Register benchmarks for 2^20 points
-BENCHMARK(BM_VROOM_MSM)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_VROOM_MSM_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_BLST_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_VROOM_MSM_V2)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_VROOM_MSM_V2_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_VROOM_V1_Pippenger)->Arg(1048576)->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_VROOM_V1_Pippenger_Parallel)->Arg(1048576)->Unit(benchmark::kMillisecond);
+// Register benchmarks over exponent inputs: 8,10,12,...,20 (npoints = 2^exp).
+BENCHMARK(BM_VROOM_MSM)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_MSM_Parallel)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_BLST_Pippenger)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_MSM_V2)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_MSM_V2_Parallel)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_V1_Pippenger)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_VROOM_V1_Pippenger_Parallel)
+    ->Apply(apply_pow2_exponents)
+    ->Unit(benchmark::kMillisecond);
 
 BENCHMARK_MAIN();
