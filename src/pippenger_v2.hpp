@@ -664,3 +664,75 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2_parallel(
 
     return result;
 }
+
+// Point-parallel multi-threaded MSM.
+// Partitions points across threads instead of windows. Each thread runs
+// an independent sub-MSM on N/T points, then partial results are summed.
+// This keeps per-thread working set small enough to fit in L2 cache.
+template<class Ring>
+ProjectivePoint<typename Ring::StandardElement> msm_v2_point_parallel(
+    const Ring &ring,
+    const AffinePoint<typename Ring::StandardElement> *points,
+    const uint8_t *const *scalars,
+    size_t npoints,
+    size_t scalar_bits = 255,
+    size_t num_threads = 0)
+{
+    using StdElem = typename Ring::StandardElement;
+    using ProjPt  = ProjectivePoint<StdElem>;
+
+    ProjPt identity(ring.zero(), ring.one(), ring.zero());
+
+    if (num_threads == 0) {
+        num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0) num_threads = 1;
+    }
+
+    if (num_threads == 1 || npoints < 1024)
+        return msm_v2(ring, points, scalars, npoints, scalar_bits);
+
+    if (npoints == 0) return identity;
+
+    // Ensure each chunk has enough points for Pippenger to be worthwhile
+    static constexpr size_t MIN_CHUNK = 256;
+    if (num_threads > npoints / MIN_CHUNK)
+        num_threads = std::max<size_t>(1, npoints / MIN_CHUNK);
+
+    size_t chunk_size = npoints / num_threads;
+    size_t remainder  = npoints % num_threads;
+
+    // Per-thread partial results
+    std::vector<ProjPt> partial_results(num_threads, identity);
+
+    auto worker = [&](size_t tid) {
+        // Compute this thread's point range
+        size_t start = tid * chunk_size + std::min(tid, remainder);
+        size_t count = chunk_size + (tid < remainder ? 1 : 0);
+        if (count == 0) return;
+
+        partial_results[tid] = msm_v2(
+            ring,
+            points + start,
+            scalars + start,
+            count,
+            scalar_bits);
+    };
+
+    // Spawn num_threads-1 workers, main thread runs as thread 0
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads - 1);
+    for (size_t t = 1; t < num_threads; t++)
+        threads.emplace_back(worker, t);
+    worker(0);
+
+    for (auto &th : threads)
+        th.join();
+
+    // Sum partial results with T-1 PointAdd operations
+    ProjPt result = partial_results[0];
+    for (size_t t = 1; t < num_threads; t++) {
+        result = PointAdd(result, partial_results[t], ring);
+    }
+
+    return result;
+}

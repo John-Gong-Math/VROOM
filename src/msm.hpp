@@ -70,3 +70,22 @@ typename Curve::ProjPoint msm_parallel(
     return msm_v2_parallel(ring, points, scalars, npoints,
                             scalar_bits, num_threads);
 }
+
+// Point-parallel multi-threaded MSM.
+// Partitions points across threads for better cache locality.
+template<class Curve, class Ring>
+typename Curve::ProjPoint msm_point_parallel(
+    const Curve &curve,
+    const Ring &ring,
+    const typename Curve::AffPoint *points,
+    const uint8_t *const *scalars,
+    size_t npoints,
+    size_t scalar_bits = 255,
+    size_t num_threads = 0
+) {
+    if (npoints < 32) {
+        return msm(curve, ring, points, scalars, npoints, scalar_bits);
+    }
+    return msm_v2_point_parallel(ring, points, scalars, npoints,
+                                  scalar_bits, num_threads);
+}
