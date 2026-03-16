@@ -736,3 +736,23 @@ ProjectivePoint<typename Ring::StandardElement> msm_v2_point_parallel(
 
     return result;
 }
+
+// Auto-dispatching parallel MSM.
+// Selects between per-window parallel and point-parallel based on N.
+// Point-parallel wins when N >= 2^17 (better cache locality per thread).
+// Per-window parallel is better for smaller N (fewer windows to steal).
+template<class Ring>
+ProjectivePoint<typename Ring::StandardElement> msm_v2_auto_parallel(
+    const Ring &ring,
+    const AffinePoint<typename Ring::StandardElement> *points,
+    const uint8_t *const *scalars,
+    size_t npoints,
+    size_t scalar_bits = 255,
+    size_t num_threads = 0)
+{
+    static constexpr size_t PP_THRESHOLD = 1u << 17;
+    if (npoints >= PP_THRESHOLD)
+        return msm_v2_point_parallel(ring, points, scalars, npoints, scalar_bits, num_threads);
+    else
+        return msm_v2_parallel(ring, points, scalars, npoints, scalar_bits, num_threads);
+}
