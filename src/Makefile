@@ -38,6 +38,8 @@ SOURCE_BENCH_PAIRING_50BIT = bench_pairing_50bit.cpp
 TARGET_TEST_MSM = test_msm
 TARGET_TEST_MSM_AVX = test_msm_avx
 SOURCE_TEST_MSM = test_msm.cpp
+TARGET_TEST_FR = test_fr
+SOURCE_TEST_FR = test_fr.cpp
 TARGET_BENCH_MSM = bench_msm
 TARGET_BENCH_MSM_AVX = bench_msm_avx
 SOURCE_BENCH_MSM = bench_msm.cpp
@@ -47,13 +49,13 @@ HEADERS = bounds.hpp constexpr_utils.hpp bounded_element.hpp ring_element.hpp \
           elementwise_reduce.hpp change_base.hpp bounded_ring.hpp \
           fp12.hpp final_exponentiation.hpp miller.hpp fp2.hpp inversion.hpp \
           ec.hpp conversion_inversion.hpp scalar_mult.hpp \
-          batch_inversion.hpp batch_affine.hpp pippenger.hpp msm.hpp
+          batch_inversion.hpp batch_affine.hpp pippenger.hpp msm.hpp fr.hpp
 
 # Google Benchmark library (adjust path as needed)
 BENCHMARK_LIBS = -lbenchmark -lpthread
 # BENCHMARK_LIBS = /home/ec2-user/benchmark/build2/src/libbenchmark.a -lpthread
 
-.PHONY: all clean test test-reduce test-inversion test-pairing test-pairing-avx test-ec test-scalar-mult test-msm test-msm-avx bench-pairing bench-pairing-fallback bench-pairing-50bit bench-pairing-50bit-fallback bench-msm bench-msm-avx run
+.PHONY: all clean test test-reduce test-inversion test-pairing test-pairing-avx test-ec test-scalar-mult test-msm test-msm-avx test-fr bench-pairing bench-pairing-fallback bench-pairing-50bit bench-pairing-50bit-fallback bench-msm bench-msm-avx run
 
 all: $(TARGET_REDUCE) $(TARGET_INVERSION) $(TARGET_TEST_PAIRING) $(TARGET_TEST_PAIRING_AVX) $(TARGET_TEST_EC) $(TARGET_TEST_SCALAR_MULT) $(TARGET_BENCH_PAIRING) $(TARGET_BENCH_PAIRING_FALLBACK) $(TARGET_BENCH_PAIRING_50BIT) $(TARGET_BENCH_PAIRING_50BIT_FALLBACK)
 
@@ -99,6 +101,9 @@ $(TARGET_BENCH_MSM): $(SOURCE_BENCH_MSM) $(HEADERS)
 $(TARGET_BENCH_MSM_AVX): $(SOURCE_BENCH_MSM) $(HEADERS)
 	$(CXX) $(CXXFLAGS_BENCH) -D__ADX__ $(INCLUDES) $(SOURCE_BENCH_MSM) -o $(TARGET_BENCH_MSM_AVX) -lgmp -lgmpxx ../blst/libblst_small.a $(BENCHMARK_LIBS)
 
+$(TARGET_TEST_FR): $(SOURCE_TEST_FR) $(HEADERS)
+	$(CXX) $(CXXFLAGS_TEST_AVX) $(INCLUDES) $(SOURCE_TEST_FR) -o $(TARGET_TEST_FR) -lgmp -lgmpxx
+
 test: $(TARGET_REDUCE) $(TARGET_INVERSION)
 	./$(TARGET_REDUCE)
 	./$(TARGET_INVERSION)
@@ -127,6 +132,9 @@ test-msm: $(TARGET_TEST_MSM)
 test-msm-avx: $(TARGET_TEST_MSM_AVX)
 	./$(TARGET_TEST_MSM_AVX)
 
+test-fr: $(TARGET_TEST_FR)
+	./$(TARGET_TEST_FR)
+
 bench-pairing: $(TARGET_BENCH_PAIRING)
 	./$(TARGET_BENCH_PAIRING)
 
@@ -148,4 +156,4 @@ bench-msm-avx: $(TARGET_BENCH_MSM_AVX)
 run: test
 
 clean:
-	rm -f $(TARGET_REDUCE) $(TARGET_INVERSION) $(TARGET_TEST_PAIRING) $(TARGET_TEST_PAIRING_AVX) $(TARGET_TEST_EC) $(TARGET_TEST_SCALAR_MULT) $(TARGET_BENCH_PAIRING) $(TARGET_BENCH_PAIRING_FALLBACK) $(TARGET_BENCH_PAIRING_50BIT) $(TARGET_BENCH_PAIRING_50BIT_FALLBACK) $(TARGET_TEST_MSM) $(TARGET_TEST_MSM_AVX) $(TARGET_BENCH_MSM) $(TARGET_BENCH_MSM_AVX)
+	rm -f $(TARGET_REDUCE) $(TARGET_INVERSION) $(TARGET_TEST_PAIRING) $(TARGET_TEST_PAIRING_AVX) $(TARGET_TEST_EC) $(TARGET_TEST_SCALAR_MULT) $(TARGET_BENCH_PAIRING) $(TARGET_BENCH_PAIRING_FALLBACK) $(TARGET_BENCH_PAIRING_50BIT) $(TARGET_BENCH_PAIRING_50BIT_FALLBACK) $(TARGET_TEST_MSM) $(TARGET_TEST_MSM_AVX) $(TARGET_BENCH_MSM) $(TARGET_BENCH_MSM_AVX) $(TARGET_TEST_FR)
